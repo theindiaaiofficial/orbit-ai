@@ -32,18 +32,18 @@
     "mammoth": "^1.9.1",
     "nodemailer": "^9.0.3",
     "pdf-parse": "^1.1.1",
-    "zod": "^3.25.67"
-  },
-  "devDependencies": {
+    "zod": "^3.25.67",
+    "typescript": "^5.8.3",
     "@types/node": "^24.0.3",
     "@types/nodemailer": "^6.4.17",
     "@types/pdf-parse": "^1.1.5",
+    "vitest": "^3.2.4"
+  },
+  "devDependencies": {
     "@typescript-eslint/eslint-plugin": "^8.34.1",
     "@typescript-eslint/parser": "^8.34.1",
     "eslint": "^9.29.0",
     "prettier": "^3.5.3",
-    "tsx": "^4.20.3",
-    "typescript": "^5.8.3",
-    "vitest": "^3.2.4"
+    "tsx": "^4.20.3"
   }
 }
