@@ -59,8 +59,8 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
   app.addHook('preHandler', auth);
   app.post('/auth/validate', async () => ({ authenticated: true }));
   app.get('/overview', async () => ({
-    ...c.repo.overview(),
-    recentAudits: c.repo.audits(12),
+    ...((await c.repo.overview()) as Record<string, unknown>),
+    recentAudits: await c.repo.audits(12),
     providers: {
       llm: c.llm.name,
       vector: (await c.vector.health()).provider,
@@ -68,26 +68,14 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
     },
   }));
   app.post('/clients', async (req) => {
-    const result = c.clients.create(createClientSchema.parse(req.body));
-  
-    req.log.info(
-      {
-        clientId: result.client.id,
-        apiKeyExists: Boolean(result.apiKey),
-        apiKeyPreview: result.apiKey ? `${result.apiKey.slice(0, 8)}...` : null,
-        embedCodeExists: Boolean(result.embedCode),
-        embedCodeHasPlaceholder: result.embedCode.includes('YOUR_API_KEY'),
-      },
-      'DEBUG create-client credentials',
-    );
-  
+    const result = await c.clients.create(createClientSchema.parse(req.body));
+
     return result;
   });
   app.get('/clients', async (req) => {
     const raw = req.query as Record<string, unknown>,
       q = listQuery.parse(raw);
-    const all = c.repo
-      .listClients()
+    const all = (await c.repo.listClients())
       .filter(
         (x) =>
           (!q.q ||
@@ -96,34 +84,34 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
               .includes(q.q.toLowerCase())) &&
           (q.status === 'all' || x.enabled === (q.status === 'active')),
       )
-      .map((x) => ({
-        ...x,
-        domains: c.repo.domains(x.id),
-        apiKey: {
-          enabled: Boolean(c.repo.keyStatus(x.id)?.enabled),
-          createdAt: c.repo.keyStatus(x.id)?.created_at,
-        },
-      }));
-    if (!Object.keys(raw).length) return all;
+      .map(async (x) => {
+        const [domains, key] = await Promise.all([c.repo.domains(x.id), c.repo.keyStatus(x.id)]);
+        return {
+          ...x,
+          domains,
+          apiKey: { enabled: Boolean(key?.enabled), createdAt: key?.created_at },
+        };
+      });
+    const resolved = await Promise.all(all);
+    if (!Object.keys(raw).length) return resolved;
     return {
-      items: all.slice((q.page - 1) * q.pageSize, q.page * q.pageSize),
-      total: all.length,
+      items: resolved.slice((q.page - 1) * q.pageSize, q.page * q.pageSize),
+      total: resolved.length,
       page: q.page,
       pageSize: q.pageSize,
     };
   });
   app.get('/clients/:id', async (req) => {
     const { id } = idParams.parse(req.params),
-      x = c.repo.getClient(id);
+      x = await c.repo.getClient(id);
     if (!x) throw new AppError(404, 'NOT_FOUND', 'Client not found');
     return {
       ...x,
-      domains: c.repo.domains(id),
-      stats: c.repo.stats(id),
-      apiKey: {
-        enabled: Boolean(c.repo.keyStatus(id)?.enabled),
-        createdAt: c.repo.keyStatus(id)?.created_at,
-      },
+      domains: await c.repo.domains(id),
+      stats: await c.repo.stats(id),
+      apiKey: await c.repo
+        .keyStatus(id)
+        .then((key) => ({ enabled: Boolean(key?.enabled), createdAt: key?.created_at })),
     };
   });
   app.patch('/clients/:id', async (req) => {
@@ -138,11 +126,11 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
       })
       .strict()
       .parse(req.body);
-    if (!c.repo.getClient(id)) throw new AppError(404, 'NOT_FOUND', 'Client not found');
-    if (body.domains) c.repo.setDomains(id, body.domains.map(normalizeDomain));
-    if (body.prompt) c.repo.savePromptVersion(id, c.repo.getClient(id)!.prompt);
-    const x = c.repo.updateClient(id, body);
-    c.repo.audit(id, 'client.updated', { fields: Object.keys(body) });
+    if (!(await c.repo.getClient(id))) throw new AppError(404, 'NOT_FOUND', 'Client not found');
+    if (body.domains) await c.repo.setDomains(id, body.domains.map(normalizeDomain));
+    if (body.prompt) await c.repo.savePromptVersion(id, (await c.repo.getClient(id))!.prompt);
+    const x = await c.repo.updateClient(id, body);
+    await c.repo.audit(id, 'client.updated', { fields: Object.keys(body) });
     return x;
   });
   app.delete('/clients/:id', async (req, reply) => {
@@ -152,7 +140,7 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
   });
   app.post('/clients/:id/duplicate', async (req) => {
     const { id } = idParams.parse(req.params),
-      old = c.repo.getClient(id);
+      old = await c.repo.getClient(id);
     if (!old) throw new AppError(404, 'NOT_FOUND', 'Client not found');
     const body = z
       .object({
@@ -160,60 +148,49 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
         slug: z.string().regex(/^[a-z0-9][a-z0-9-]{1,62}$/),
       })
       .parse(req.body);
-    return c.clients.create({
+    return await c.clients.create({
       name: body.name,
       slug: body.slug,
-      domains: c.repo.domains(id),
+      domains: await c.repo.domains(id),
       config: old.config,
       prompt: old.prompt,
     });
   });
   app.post('/clients/:id/rotate-key', async (req) => {
     const { id } = idParams.parse(req.params),
-      credentials = c.clients.rotate(id);
-    
-      req.log.info(
-        {
-          clientId: id,
-          credentialsExists: Boolean(credentials),
-          apiKeyExists: Boolean(credentials?.apiKey),
-          apiKeyPreview: credentials?.apiKey ? `${credentials.apiKey.slice(0, 8)}...` : null,
-          embedCodeExists: Boolean(credentials?.embedCode),
-          embedCodeHasPlaceholder: credentials?.embedCode?.includes('YOUR_API_KEY') ?? null,
-        },
-        'DEBUG rotate-key credentials',
-      );
-    
+      credentials = await c.clients.rotate(id);
+
     if (!credentials) throw new AppError(404, 'NOT_FOUND', 'Client not found');
     return credentials;
   });
   app.post('/clients/:id/key/:action', async (req) => {
     const { id } = idParams.parse(req.params),
       { action } = z.object({ action: z.enum(['disable', 'enable']) }).parse(req.params);
-    if (!c.repo.setKeyEnabled(id, action === 'enable'))
+    if (!(await c.repo.setKeyEnabled(id, action === 'enable')))
       throw new AppError(404, 'NOT_FOUND', 'Client not found');
-    c.repo.audit(id, `key.${action}d`, {});
+    await c.repo.audit(id, `key.${action}d`, {});
     return { enabled: action === 'enable' };
   });
-  app.get('/clients/:id/prompts/history', async (req) =>
-    c.repo.promptVersions(idParams.parse(req.params).id),
+  app.get(
+    '/clients/:id/prompts/history',
+    async (req) => await c.repo.promptVersions(idParams.parse(req.params).id),
   );
   app.post('/clients/:id/prompts/:versionId/restore', async (req) => {
     const { id } = idParams.parse(req.params),
       { versionId } = z.object({ versionId: z.string().uuid() }).parse(req.params),
-      v = c.repo.promptVersion(versionId);
+      v = await c.repo.promptVersion(versionId);
     if (!v || v.client_id !== id) throw new AppError(404, 'NOT_FOUND', 'Prompt version not found');
-    const current = c.repo.getClient(id);
+    const current = await c.repo.getClient(id);
     if (!current) throw new AppError(404, 'NOT_FOUND', 'Client not found');
-    c.repo.savePromptVersion(id, current.prompt);
-    return c.repo.updateClient(id, { prompt: v.prompt });
+    await c.repo.savePromptVersion(id, current.prompt);
+    return await c.repo.updateClient(id, { prompt: v.prompt });
   });
   app.post('/clients/:id/prompts/reset', async (req) => {
     const { id } = idParams.parse(req.params),
-      x = c.repo.getClient(id);
+      x = await c.repo.getClient(id);
     if (!x) throw new AppError(404, 'NOT_FOUND', 'Client not found');
-    c.repo.savePromptVersion(id, x.prompt);
-    return c.repo.updateClient(id, {
+    await c.repo.savePromptVersion(id, x.prompt);
+    return await c.repo.updateClient(id, {
       prompt:
         'Answer using only the supplied knowledge. If the answer is unavailable, use the configured fallback message.',
     });
@@ -223,7 +200,7 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
       body = z
         .object({ question: z.string().min(1).max(1000), prompt: z.string().min(1).max(20000) })
         .parse(req.body),
-      x = c.repo.getClient(id);
+      x = await c.repo.getClient(id);
     if (!x) throw new AppError(404, 'NOT_FOUND', 'Client not found');
     const [query] = await c.embedding.embed([body.question]);
     const context = await c.vector.search(
@@ -265,20 +242,20 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
   });
   app.post('/clients/:id/prompt', async (req) => {
     const { id } = idParams.parse(req.params),
-      x = c.repo.getClient(id);
+      x = await c.repo.getClient(id);
     if (!x) throw new AppError(404, 'NOT_FOUND', 'Client not found');
     const part = await req.file({ limits: { fileSize: 256 * 1024, files: 1 } });
     if (!part || !/[.](txt|md)$/i.test(part.filename))
       throw new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Prompt must be TXT or MD');
     const prompt = (await part.toBuffer()).toString('utf8').trim();
     if (!prompt) throw new AppError(400, 'VALIDATION_ERROR', 'Prompt cannot be empty');
-    c.repo.savePromptVersion(id, x.prompt);
-    c.repo.updateClient(id, { prompt });
+    await c.repo.savePromptVersion(id, x.prompt);
+    await c.repo.updateClient(id, { prompt });
     return { updated: true };
   });
   app.post('/clients/:id/config', async (req) => {
     const { id } = idParams.parse(req.params);
-    if (!c.repo.getClient(id)) throw new AppError(404, 'NOT_FOUND', 'Client not found');
+    if (!(await c.repo.getClient(id))) throw new AppError(404, 'NOT_FOUND', 'Client not found');
     const part = await req.file({ limits: { fileSize: 64 * 1024, files: 1 } });
     if (!part || !/[.]json$/i.test(part.filename))
       throw new AppError(415, 'UNSUPPORTED_MEDIA_TYPE', 'Config must be JSON');
@@ -289,12 +266,12 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
       throw new AppError(400, 'VALIDATION_ERROR', 'Config is not valid JSON');
     }
     const config = configSchema.parse(raw);
-    c.repo.updateClient(id, { config });
+    await c.repo.updateClient(id, { config });
     return { updated: true, config };
   });
   app.post('/clients/:id/knowledge', async (req) => {
     const { id } = idParams.parse(req.params);
-    if (!c.repo.getClient(id)) throw new AppError(404, 'NOT_FOUND', 'Client not found');
+    if (!(await c.repo.getClient(id))) throw new AppError(404, 'NOT_FOUND', 'Client not found');
     const results = [];
     for await (const part of req.parts()) {
       if (part.type === 'file')
@@ -323,15 +300,15 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
           pageSize: z.coerce.number().int().min(1).max(500).default(25),
         })
         .parse(raw);
-    const all = (c.repo.listLeads(id) as LeadRow[]).filter(
+    const resolved = ((await c.repo.listLeads(id)) as LeadRow[]).filter(
       (x) =>
         (q.status === 'all' || x.status === q.status) &&
         (!q.q || JSON.stringify(x).toLowerCase().includes(q.q.toLowerCase())),
     );
-    if (!Object.keys(raw).length) return all;
+    if (!Object.keys(raw).length) return resolved;
     return {
-      items: all.slice((q.page - 1) * q.pageSize, q.page * q.pageSize),
-      total: all.length,
+      items: resolved.slice((q.page - 1) * q.pageSize, q.page * q.pageSize),
+      total: resolved.length,
       page: q.page,
       pageSize: q.pageSize,
     };
@@ -340,24 +317,26 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
     const { id } = idParams.parse(req.params),
       { leadId } = z.object({ leadId: z.string().uuid() }).parse(req.params),
       body = leadPatch.parse(req.body);
-    if (!c.repo.getClient(id) || !c.repo.updateLead(id, leadId, body))
+    if (!(await c.repo.getClient(id)) || !(await c.repo.updateLead(id, leadId, body)))
       throw new AppError(404, 'NOT_FOUND', 'Lead not found');
-    c.repo.audit(id, 'lead.updated', { leadId, fields: Object.keys(body) });
+    await c.repo.audit(id, 'lead.updated', { leadId, fields: Object.keys(body) });
     return { updated: true };
   });
   app.get('/clients/:id/leads/:leadId', async (req) => {
     const { id } = idParams.parse(req.params),
       { leadId } = z.object({ leadId: z.string().uuid() }).parse(req.params),
-      lead = (c.repo.listLeads(id) as LeadRow[]).find((x) => x.id === leadId);
+      lead = ((await c.repo.listLeads(id)) as LeadRow[]).find((x) => x.id === leadId);
     if (!lead) throw new AppError(404, 'NOT_FOUND', 'Lead not found');
     return {
       ...lead,
-      conversation: lead.conversationId ? c.repo.conversationForClient(id, lead.conversationId) : null,
+      conversation: lead.conversationId
+        ? await c.repo.conversationForClient(id, lead.conversationId)
+        : null,
     };
   });
   app.get('/clients/:id/leads.csv', async (req, reply) => {
     const { id } = idParams.parse(req.params),
-      rows = c.repo.listLeads(id) as LeadRow[],
+      rows = (await c.repo.listLeads(id)) as LeadRow[],
       esc = (v: unknown) => `"${String(v ?? '').replaceAll('"', '""')}"`;
     const columns = [
       'id',
@@ -385,10 +364,10 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
         .object({ period: z.enum(['daily', 'weekly', 'monthly']).default('daily') })
         .parse(req.query),
       days = period === 'daily' ? 30 : period === 'weekly' ? 84 : 365;
-    return c.repo.analytics(id, days);
+    return await c.repo.analytics(id, days);
   });
   app.get('/settings/provider', async () => {
-    const saved = (c.repo.setting('provider') ?? {}) as Record<string, unknown>;
+    const saved = ((await c.repo.setting('provider')) ?? {}) as Record<string, unknown>;
     return {
       running: {
         provider: c.env.llm.providerName,
@@ -404,8 +383,8 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
   });
   app.put('/settings/provider', async (req) => {
     const v = providerSchema.omit({ apiKey: true }).parse(req.body);
-    c.repo.setSetting('provider', v);
-    c.repo.audit(undefined, 'provider.settings.staged', { provider: v.provider });
+    await c.repo.setSetting('provider', v);
+    await c.repo.audit(undefined, 'provider.settings.staged', { provider: v.provider });
     return { saved: true, restartRequired: true, secretPersisted: false };
   });
   app.post('/settings/provider/test', async (req) => {
@@ -456,8 +435,8 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
       user: c.env.SMTP_USER ? 'configured' : null,
       password: c.env.SMTP_PASS ? '••••••••' : null,
     },
-    storage: { provider: c.storage.constructor.name, dataDir: c.env.DATA_DIR },
-    database: { provider: 'sqlite' },
+    storage: { provider: c.storage.name, dataDir: c.env.DATA_DIR },
+    database: { provider: c.repo.name },
     api: { corsOrigins: c.env.CORS_ORIGINS },
     environment: {
       nodeVersion: process.version,
@@ -470,8 +449,8 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
     status: 'ok',
     version: '1.0.0',
     providers: {
-      database: { provider: 'sqlite', connected: true },
-      storage: { provider: 'local', connected: true },
+      database: await c.repo.health(),
+      storage: await c.storage.health(),
       llm: await c.llm.health(),
       embedding: await c.embedding.health(),
       vector: await c.vector.health(),

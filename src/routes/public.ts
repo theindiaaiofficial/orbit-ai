@@ -9,16 +9,17 @@ export async function publicRoutes(app: FastifyInstance, c: Context) {
       origin = req.headers.origin;
     if (typeof key !== 'string')
       throw new AppError(401, 'INVALID_API_KEY', 'Valid public client credential required');
-    const client = c.repo.getClientByKeyHash(hashKey(key));
+    const client = await c.repo.getClientByKeyHash(hashKey(key));
     if (!client?.enabled)
       throw new AppError(401, 'INVALID_API_KEY', 'Valid public client credential required');
-    if (typeof origin !== 'string' || !originMatches(origin, c.repo.domains(client.id)))
+    if (typeof origin !== 'string' || !originMatches(origin, await c.repo.domains(client.id)))
       throw new AppError(403, 'ORIGIN_FORBIDDEN', 'Origin is not allowed');
     (req as FastifyRequest & { tenantId: string }).tenantId = client.id;
   };
   app.addHook('preHandler', tenant);
   app.get('/config', async (req) => {
-    const x = c.repo.getClient((req as FastifyRequest & { tenantId: string }).tenantId)!;
+    const x = await c.repo.getClient((req as FastifyRequest & { tenantId: string }).tenantId);
+    if (!x) throw new AppError(404, 'NOT_FOUND', 'Client not found');
     return {
       assistantName: x.config.assistantName,
       welcomeMessage: x.config.welcomeMessage,
@@ -38,16 +39,17 @@ export async function publicRoutes(app: FastifyInstance, c: Context) {
     const b = leadSchema.parse(req.body);
     const tid = (req as FastifyRequest & { tenantId: string }).tenantId;
     const { conversationId, ...data } = b;
-    if (conversationId && !c.repo.conversationForClient(tid, conversationId))
+    if (conversationId && !(await c.repo.conversationForClient(tid, conversationId)))
       throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversation not found');
-    const id = c.repo.saveLead(tid, conversationId, data as Record<string, string>);
-    const client = c.repo.getClient(tid)!;
+    const id = await c.repo.saveLead(tid, conversationId, data as Record<string, string>);
+    const client = (await c.repo.getClient(tid))!;
     await c.notification.notify(
       client.config.notificationEmail ?? client.config.teamEmail,
       `New lead for ${client.name}`,
       { id, ...data },
+      tid,
     );
-    c.repo.audit(tid, 'lead.created', { leadId: id });
+    await c.repo.audit(tid, 'lead.created', { leadId: id });
     return { id, status: 'accepted' };
   });
 }
