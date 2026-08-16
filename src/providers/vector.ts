@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import fs from 'node:fs';
 import path from 'node:path';
 import type { ProviderHealth, RetrievedChunk, VectorRecord } from '../domain/types.js';
@@ -133,5 +134,77 @@ export class QdrantVector implements VectorProvider {
     } catch {
       return { provider: this.name, connected: false };
     }
+  }
+}
+
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+/** pgvector adapter. Every operation supplies client_id; SQL RPC also enforces it. */
+export class SupabaseVector implements VectorProvider {
+  readonly name = 'supabase-pgvector';
+  private readonly client: SupabaseClient<any>;
+  constructor(urlOrClient: string | SupabaseClient<any>, key?: string) {
+    this.client =
+      typeof urlOrClient === 'string'
+        ? createClient(urlOrClient, key ?? '', {
+            auth: { persistSession: false, autoRefreshToken: false },
+          })
+        : urlOrClient;
+  }
+  // LocalEmbedding and the Supabase schema both use exactly 128 dimensions.
+  // Never coerce vectors: accepting a different dimension would fail later in
+  // pgvector with a less actionable error and could corrupt provider switching.
+  private validate(v: number[]) {
+    if (v.length !== 128)
+      throw new Error(`pgvector embedding must have exactly 128 dimensions; received ${v.length}`);
+    return v;
+  }
+  async upsert(clientId: string, rows: VectorRecord[]) {
+    if (!rows.length) return;
+    const { error } = await this.client.from('knowledge_vectors').upsert(
+      rows.map((x) => ({
+        id: x.id,
+        client_id: clientId,
+        source: x.source,
+        content: x.text,
+        embedding: this.validate(x.embedding),
+      })),
+      { onConflict: 'id' },
+    );
+    if (error) throw new Error(`pgvector upsert failed: ${error.message}`);
+  }
+  async replaceSource(clientId: string, source: string, rows: VectorRecord[]) {
+    const { error: de } = await this.client
+      .from('knowledge_vectors')
+      .delete()
+      .eq('client_id', clientId)
+      .eq('source', source);
+    if (de) throw new Error(`pgvector source delete failed: ${de.message}`);
+    await this.upsert(clientId, rows);
+  }
+  async search(clientId: string, v: number[], topK: number, min: number) {
+    const { data, error } = await this.client.rpc('match_knowledge_vectors', {
+      query_embedding: this.validate(v),
+      match_client_id: clientId,
+      match_threshold: min,
+      match_count: topK,
+    });
+    if (error) throw new Error(`pgvector search failed: ${error.message}`);
+    return (data ?? []).map((x: any) => ({
+      id: String(x.id),
+      text: String(x.text ?? x.content),
+      source: String(x.source),
+      score: Number(x.similarity ?? x.score),
+    }));
+  }
+  async deleteTenant(clientId: string) {
+    const { error } = await this.client
+      .from('knowledge_vectors')
+      .delete()
+      .eq('client_id', clientId);
+    if (error) throw new Error(`pgvector tenant delete failed: ${error.message}`);
+  }
+  async health(): Promise<ProviderHealth> {
+    const { error } = await this.client.from('knowledge_vectors').select('id').limit(1);
+    return { provider: this.name, connected: !error, detail: error?.message };
   }
 }
