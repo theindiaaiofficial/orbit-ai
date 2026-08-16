@@ -6,12 +6,13 @@ import fs from 'node:fs';
 import path from 'node:path';
 const now = () => new Date().toISOString();
 export class SqliteRepository implements Repository {
+  readonly name = 'sqlite';
   private db: DatabaseSync;
   constructor(file: string) {
     fs.mkdirSync(path.dirname(file), { recursive: true });
     this.db = new DatabaseSync(file);
   }
-  init() {
+  async init() {
     this.db.exec(`PRAGMA foreign_keys=ON; PRAGMA journal_mode=WAL;
 CREATE TABLE IF NOT EXISTS clients(id TEXT PRIMARY KEY,name TEXT NOT NULL,slug TEXT UNIQUE NOT NULL,enabled INTEGER NOT NULL DEFAULT 1,config TEXT NOT NULL,prompt TEXT NOT NULL,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS api_keys(id TEXT PRIMARY KEY,client_id TEXT UNIQUE NOT NULL,key_hash TEXT UNIQUE NOT NULL,created_at TEXT NOT NULL,FOREIGN KEY(client_id) REFERENCES clients(id) ON DELETE CASCADE);
@@ -32,8 +33,11 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
     if (!keyCols.some((x) => x.name === 'enabled'))
       this.db.exec('ALTER TABLE api_keys ADD COLUMN enabled INTEGER NOT NULL DEFAULT 1');
   }
-  close() {
+  async close() {
     this.db.close();
+  }
+  async health() {
+    return { provider: this.name, connected: true };
   }
   private map(r: Record<string, unknown>): Client {
     return {
@@ -47,7 +51,7 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
       updatedAt: String(r.updated_at),
     };
   }
-  createClient(v: CreateClient) {
+  async createClient(v: CreateClient) {
     const t = now();
     this.db.exec('BEGIN');
     try {
@@ -63,9 +67,9 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
       this.db.exec('ROLLBACK');
       throw e;
     }
-    return this.getClient(v.id)!;
+    return (await this.getClient(v.id))!;
   }
-  listClients() {
+  async listClients() {
     return (
       this.db.prepare('SELECT * FROM clients ORDER BY created_at').all() as Record<
         string,
@@ -73,12 +77,12 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
       >[]
     ).map((r) => this.map(r));
   }
-  getClient(id: string) {
+  async getClient(id: string) {
     const r = this.db.prepare('SELECT * FROM clients WHERE id=?').get(id) as
       Record<string, unknown> | undefined;
     return r ? this.map(r) : undefined;
   }
-  getClientByKeyHash(h: string) {
+  async getClientByKeyHash(h: string) {
     const r = this.db
       .prepare(
         'SELECT c.* FROM clients c JOIN api_keys k ON k.client_id=c.id WHERE k.key_hash=? AND k.enabled=1',
@@ -86,29 +90,29 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
       .get(h) as Record<string, unknown> | undefined;
     return r ? this.map(r) : undefined;
   }
-  updateClient(
+  async updateClient(
     id: string,
     v: Partial<{ name: string; config: ClientConfig; prompt: string; enabled: boolean }>,
   ) {
-    const old = this.getClient(id);
+    const old = await this.getClient(id);
     if (!old) return;
     const n = { ...old, ...v, updatedAt: now() };
     this.db
       .prepare('UPDATE clients SET name=?,config=?,prompt=?,enabled=?,updated_at=? WHERE id=?')
       .run(n.name, JSON.stringify(n.config), n.prompt, n.enabled ? 1 : 0, n.updatedAt, id);
-    return this.getClient(id);
+    return await this.getClient(id);
   }
-  deleteClient(id: string) {
+  async deleteClient(id: string) {
     return this.db.prepare('DELETE FROM clients WHERE id=?').run(id).changes > 0;
   }
-  domains(id: string) {
+  async domains(id: string) {
     return (
       this.db.prepare('SELECT domain FROM domains WHERE client_id=?').all(id) as {
         domain: string;
       }[]
     ).map((x) => x.domain);
   }
-  setDomains(id: string, d: string[]) {
+  async setDomains(id: string, d: string[]) {
     this.db.exec('BEGIN');
     try {
       this.db.prepare('DELETE FROM domains WHERE client_id=?').run(id);
@@ -119,12 +123,12 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
       throw e;
     }
   }
-  rotateKey(id: string, h: string) {
+  async rotateKey(id: string, h: string) {
     this.db
       .prepare('UPDATE api_keys SET key_hash=?,created_at=? WHERE client_id=?')
       .run(h, now(), id);
   }
-  createConversation(clientId: string, sessionId: string) {
+  async createConversation(clientId: string, sessionId: string) {
     const found = this.db
       .prepare('SELECT id FROM conversations WHERE client_id=? AND session_id=?')
       .get(clientId, sessionId) as { id: string } | undefined;
@@ -135,24 +139,24 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
       .run(id, clientId, sessionId, now());
     return id;
   }
-  addMessage(cid: string, role: 'user' | 'assistant', content: string) {
+  async addMessage(cid: string, role: 'user' | 'assistant', content: string) {
     this.db
       .prepare('INSERT INTO messages VALUES(?,?,?,?,?)')
       .run(crypto.randomUUID(), cid, role, content, now());
   }
-  messages(cid: string) {
+  async messages(cid: string) {
     return this.db
       .prepare('SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at')
       .all(cid) as ChatMessage[];
   }
-  saveLead(clientId: string, cid: string | undefined, data: Record<string, string>) {
+  async saveLead(clientId: string, cid: string | undefined, data: Record<string, string>) {
     const id = crypto.randomUUID();
     this.db
       .prepare('INSERT INTO leads(id,client_id,conversation_id,data,created_at) VALUES(?,?,?,?,?)')
       .run(id, clientId, cid ?? null, JSON.stringify(data), now());
     return id;
   }
-  listLeads(clientId: string) {
+  async listLeads(clientId: string) {
     return (
       this.db
         .prepare(
@@ -179,50 +183,50 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
       updatedAt: x.updated_at,
     }));
   }
-  usage(c: string, k: string, u: number, l: number) {
+  async usage(c: string, k: string, u: number, l: number) {
     this.db
       .prepare('INSERT INTO usage_logs VALUES(?,?,?,?,?,?)')
       .run(crypto.randomUUID(), c, k, u, l, now());
   }
-  audit(c: string | undefined, a: string, d: unknown) {
+  async audit(c: string | undefined, a: string, d: unknown) {
     this.db
       .prepare('INSERT INTO audit_logs VALUES(?,?,?,?,?)')
       .run(crypto.randomUUID(), c ?? null, a, JSON.stringify(d), now());
   }
-  stats(c: string) {
+  async stats(c: string) {
     return this.db
       .prepare(
         `SELECT (SELECT count(*) FROM conversations WHERE client_id=?) conversations,(SELECT count(*) FROM messages m JOIN conversations x ON x.id=m.conversation_id WHERE x.client_id=?) messages,(SELECT count(*) FROM leads WHERE client_id=?) leads,(SELECT coalesce(sum(units),0) FROM usage_logs WHERE client_id=?) units`,
       )
       .get(c, c, c, c);
   }
-  keyStatus(id: string) {
+  async keyStatus(id: string) {
     return this.db.prepare('SELECT enabled,created_at FROM api_keys WHERE client_id=?').get(id) as
       { enabled: number; created_at: string } | undefined;
   }
-  setKeyEnabled(id: string, enabled: boolean) {
+  async setKeyEnabled(id: string, enabled: boolean) {
     return (
       this.db.prepare('UPDATE api_keys SET enabled=? WHERE client_id=?').run(enabled ? 1 : 0, id)
         .changes > 0
     );
   }
-  savePromptVersion(clientId: string, prompt: string) {
+  async savePromptVersion(clientId: string, prompt: string) {
     const id = crypto.randomUUID();
     this.db.prepare('INSERT INTO prompt_versions VALUES(?,?,?,?)').run(id, clientId, prompt, now());
     return id;
   }
-  promptVersions(clientId: string) {
+  async promptVersions(clientId: string) {
     return this.db
       .prepare(
         'SELECT id,prompt,created_at createdAt FROM prompt_versions WHERE client_id=? ORDER BY created_at DESC',
       )
       .all(clientId);
   }
-  promptVersion(id: string) {
+  async promptVersion(id: string) {
     return this.db.prepare('SELECT * FROM prompt_versions WHERE id=?').get(id) as
       { id: string; client_id: string; prompt: string } | undefined;
   }
-  saveKnowledge(
+  async saveKnowledge(
     clientId: string,
     filename: string,
     size: number,
@@ -235,19 +239,19 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
       )
       .run(clientId, filename, size, chunks, status, now());
   }
-  knowledge(clientId: string) {
+  async knowledge(clientId: string) {
     return this.db
       .prepare(
         'SELECT filename,size,chunks,status,updated_at updatedAt FROM knowledge_files WHERE client_id=? ORDER BY updated_at DESC',
       )
       .all(clientId);
   }
-  removeKnowledge(clientId: string, filename: string) {
+  async removeKnowledge(clientId: string, filename: string) {
     this.db
       .prepare('DELETE FROM knowledge_files WHERE client_id=? AND filename=?')
       .run(clientId, filename);
   }
-  audits(limit = 20) {
+  async audits(limit = 20) {
     return this.db
       .prepare(
         'SELECT id,client_id clientId,action,detail,created_at createdAt FROM audit_logs ORDER BY created_at DESC LIMIT ?',
@@ -258,20 +262,20 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
         return { ...row, detail: JSON.parse(row.detail) };
       });
   }
-  overview() {
+  async overview() {
     return this.db
       .prepare(
         `SELECT (SELECT count(*) FROM clients) clients,(SELECT count(*) FROM clients WHERE enabled=1) activeClients,(SELECT count(*) FROM conversations) conversations,(SELECT count(*) FROM leads) leads,(SELECT count(*) FROM conversations WHERE date(created_at)=date('now')) conversationsToday,(SELECT count(*) FROM leads WHERE date(created_at)=date('now')) leadsToday`,
       )
       .get();
   }
-  conversationForClient(clientId: string, id: string) {
+  async conversationForClient(clientId: string, id: string) {
     const conversation = this.db
       .prepare('SELECT * FROM conversations WHERE id=? AND client_id=?')
       .get(id, clientId);
     return conversation ? { ...conversation, messages: this.messages(id) } : undefined;
   }
-  updateLead(
+  async updateLead(
     clientId: string,
     id: string,
     data: { status?: string; assignee?: string | null; notes?: string },
@@ -291,25 +295,25 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
       .run(id, data.status ?? 'new', data.assignee ?? null, data.notes ?? '', now());
     return true;
   }
-  setSetting(key: string, value: unknown) {
+  async setSetting(key: string, value: unknown) {
     this.db
       .prepare(
         `INSERT INTO settings VALUES(?,?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value,updated_at=excluded.updated_at`,
       )
       .run(key, JSON.stringify(value), now());
   }
-  setting(key: string) {
+  async setting(key: string) {
     const r = this.db.prepare('SELECT value FROM settings WHERE key=?').get(key) as
       { value: string } | undefined;
     return r ? JSON.parse(r.value) : undefined;
   }
-  analytics(clientId: string, days = 30) {
+  async analytics(clientId: string, days = 30) {
     const series = this.db
       .prepare(
         `WITH RECURSIVE dates(d) AS (SELECT date('now', ?) UNION ALL SELECT date(d,'+1 day') FROM dates WHERE d<date('now')) SELECT dates.d date,count(DISTINCT c.id) chats,count(DISTINCT l.id) leads FROM dates LEFT JOIN conversations c ON c.client_id=? AND date(c.created_at)=dates.d LEFT JOIN leads l ON l.client_id=? AND date(l.created_at)=dates.d GROUP BY dates.d ORDER BY dates.d`,
       )
       .all(`-${days - 1} days`, clientId, clientId);
-    const base = this.stats(clientId) as {
+    const base = (await this.stats(clientId)) as {
       conversations: number;
       messages: number;
       leads: number;
