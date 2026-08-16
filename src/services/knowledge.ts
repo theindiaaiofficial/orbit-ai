@@ -3,13 +3,13 @@ import type { EmbeddingProvider } from '../providers/embedding.js';
 import type { VectorProvider } from '../providers/vector.js';
 import type { ObjectStorage } from '../providers/storage.js';
 import { chunks, parseDocument } from './parser.js';
-import type { SqliteRepository } from '../repositories/sqlite.js';
+import type { Repository } from '../repositories/repository.js';
 export class KnowledgeService {
   constructor(
     private storage: ObjectStorage,
     private embeddings: EmbeddingProvider,
     private vectors: VectorProvider,
-    private repo?: SqliteRepository,
+    private repo?: Repository,
   ) {}
   async upload(clientId: string, name: string, data: Buffer) {
     const text = await parseDocument(name, data);
@@ -28,7 +28,7 @@ export class KnowledgeService {
         embedding: e[i]!,
       })),
     );
-    this.repo?.saveKnowledge(clientId, name, data.byteLength, parts.length, 'ready');
+    await this.repo?.saveKnowledge(clientId, name, data.byteLength, parts.length, 'ready');
     return {
       filename: name,
       size: data.byteLength,
@@ -37,7 +37,7 @@ export class KnowledgeService {
     };
   }
   async list(clientId: string) {
-    const metadata = this.repo?.knowledge(clientId) as
+    const metadata = (await this.repo?.knowledge(clientId)) as
       | Array<{ filename: string; size: number; chunks: number; status: string; updatedAt: string }>
       | undefined;
     if (metadata?.length)
@@ -55,7 +55,7 @@ export class KnowledgeService {
   }
   async remove(clientId: string, filename: string) {
     await this.storage.remove(clientId, filename);
-    this.repo?.removeKnowledge(clientId, filename);
+    await this.repo?.removeKnowledge(clientId, filename);
     // A rebuild keeps vector providers consistent without relying on provider-specific deletes.
     return this.rebuild(clientId);
   }

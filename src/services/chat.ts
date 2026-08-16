@@ -12,12 +12,12 @@ export class ChatService {
     private llm: LlmProvider,
   ) {}
   async chat(clientId: string, message: string, sessionId?: string) {
-    const client = this.repo.getClient(clientId);
+    const client = await this.repo.getClient(clientId);
     if (!client?.enabled) throw new AppError(403, 'TENANT_DISABLED', 'Tenant is disabled');
     const started = Date.now();
     const sid = sessionId ?? crypto.randomUUID();
-    const cid = this.repo.createConversation(clientId, sid);
-    this.repo.addMessage(cid, 'user', message);
+    const cid = await this.repo.createConversation(clientId, sid);
+    await this.repo.addMessage(cid, 'user', message);
     const [q] = await this.embedding.embed([message]);
     const found = await this.vector.search(
       clientId,
@@ -31,8 +31,8 @@ export class ChatService {
       context: found,
       config: client.config,
     });
-    this.repo.addMessage(cid, 'assistant', answer);
-    this.repo.usage(clientId, 'chat', message.length + answer.length, Date.now() - started);
+    await this.repo.addMessage(cid, 'assistant', answer);
+    await this.repo.usage(clientId, 'chat', message.length + answer.length, Date.now() - started);
     return {
       sessionId: sid,
       conversationId: cid,
