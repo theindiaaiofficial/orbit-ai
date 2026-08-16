@@ -8,11 +8,16 @@ import path from 'node:path';
 import { ZodError } from 'zod';
 import type { Env } from './config/env.js';
 import { SqliteRepository } from './repositories/sqlite.js';
-import { LocalStorage } from './providers/storage.js';
+import { SupabaseRepository } from './repositories/supabase.js';
+import { LocalStorage, SupabaseStorage } from './providers/storage.js';
 import { LocalEmbedding, OpenAIEmbedding } from './providers/embedding.js';
-import { LocalVector, QdrantVector } from './providers/vector.js';
+import { LocalVector, QdrantVector, SupabaseVector } from './providers/vector.js';
 import { createLlmProvider } from './providers/llm.js';
-import { OutboxNotification, SmtpNotification } from './providers/notification.js';
+import {
+  OutboxNotification,
+  SmtpNotification,
+  SupabaseOutboxNotification,
+} from './providers/notification.js';
 import { ClientService } from './services/clients.js';
 import { KnowledgeService } from './services/knowledge.js';
 import { ChatService } from './services/chat.js';
@@ -37,9 +42,16 @@ export async function buildApp(env: Env) {
     bodyLimit: 1024 * 1024,
     requestTimeout: 30000,
   });
-  const repo = new SqliteRepository(path.join(env.DATA_DIR, 'metadata.sqlite'));
-  repo.init();
-  const storage = new LocalStorage(path.join(env.DATA_DIR, 'objects'));
+  const supabaseKey = env.SUPABASE_SERVICE_ROLE_KEY ?? env.SUPABASE_ANON_KEY;
+  const repo =
+    env.DATABASE_PROVIDER === 'supabase'
+      ? new SupabaseRepository(env.SUPABASE_URL!, supabaseKey)
+      : new SqliteRepository(path.join(env.DATA_DIR, 'metadata.sqlite'));
+  await repo.init();
+  const storage =
+    env.STORAGE_PROVIDER === 'supabase'
+      ? new SupabaseStorage(env.SUPABASE_URL!, env.SUPABASE_STORAGE_BUCKET, supabaseKey)
+      : new LocalStorage(path.join(env.DATA_DIR, 'objects'));
   const embedding =
     env.EMBEDDING_PROVIDER === 'openai'
       ? new OpenAIEmbedding(env.OPENAI_BASE_URL, env.OPENAI_API_KEY, env.OPENAI_EMBEDDING_MODEL)
@@ -47,7 +59,9 @@ export async function buildApp(env: Env) {
   const vector =
     env.VECTOR_PROVIDER === 'qdrant'
       ? new QdrantVector(env.QDRANT_URL, env.QDRANT_API_KEY)
-      : new LocalVector(path.join(env.DATA_DIR, 'vectors.json'));
+      : env.VECTOR_PROVIDER === 'supabase'
+        ? new SupabaseVector(env.SUPABASE_URL!, supabaseKey)
+        : new LocalVector(path.join(env.DATA_DIR, 'vectors.json'));
   const llm = createLlmProvider(env.llm);
   const notification =
     env.NOTIFICATION_PROVIDER === 'smtp'
@@ -58,7 +72,9 @@ export async function buildApp(env: Env) {
           pass: env.SMTP_PASS,
           from: env.SMTP_FROM,
         })
-      : new OutboxNotification(path.join(env.DATA_DIR, 'outbox'));
+      : env.NOTIFICATION_PROVIDER === 'supabase'
+        ? new SupabaseOutboxNotification(env.SUPABASE_URL!, env.SUPABASE_OUTBOX_TABLE, supabaseKey)
+        : new OutboxNotification(path.join(env.DATA_DIR, 'outbox'));
   const metrics = new Metrics();
   const clients = new ClientService(repo, storage, vector, env.PUBLIC_BASE_URL);
   const knowledge = new KnowledgeService(storage, embedding, vector, repo);
@@ -110,7 +126,7 @@ export async function buildApp(env: Env) {
         res.header('Cross-Origin-Resource-Policy', 'cross-origin');
         res.header('Cache-Control', 'no-store');
       }
-    
+
       if (pathName.endsWith('admin/index.html')) {
         res.header('Cache-Control', 'no-store');
       }
