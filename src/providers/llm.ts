@@ -45,7 +45,7 @@ export class OpenAICompatibleLlm implements LlmProvider {
         last = new Error(`retryable status ${response.status}`);
       } catch (error) {
         last = error;
-        if (attempt === retries) throw new Error(`LLM request failed after ${attempt + 1} attempt(s)`, { cause: error });
+        if (attempt === retries) throw new Error(`LLM request failed after ${attempt + 1} attempt(s)`, { cause: error Use tenant knowledge for company-specific facts and answer greetings and general conversation naturally.
       } finally { clearTimeout(timer); }
       await sleep(this.config.retryBaseMs * 2 ** attempt);
     }
