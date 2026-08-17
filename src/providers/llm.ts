@@ -1,13 +1,10 @@
-import type { ClientConfig, ProviderHealth, RetrievedChunk } from '../domain/types.js';
+import type { ChatMessage, ClientConfig, ProviderHealth, RetrievedChunk } from '../domain/types.js';
 import type { LlmConfig } from '../config/llm.js';
+export interface LlmInput { question: string; prompt: string; context: RetrievedChunk[]; config: ClientConfig; history?: ChatMessage[] }
 export interface LlmProvider {
   readonly name: string;
-  answer(input: {
-    question: string;
-    prompt: string;
-    context: RetrievedChunk[];
-    config: ClientConfig;
-  }): Promise<string>;
+  answer(input: LlmInput): Promise<string>;
+  streamAnswer(input: LlmInput, onToken: (token: string) => void): Promise<string>;
   health(): Promise<ProviderHealth>;
 }
 type Fetch = typeof fetch;
@@ -16,189 +13,82 @@ const retryable = (status: number) => [408, 409, 425, 429].includes(status) || s
 
 export class LocalLlm implements LlmProvider {
   readonly name: string;
-  constructor(private providerName = 'local') {
-    this.name = providerName === 'local' ? 'local-extractive' : providerName;
-  }
-  async answer(i: {
-    question: string;
-    prompt: string;
-    context: RetrievedChunk[];
-    config: ClientConfig;
-  }) {
-    if (!i.context.length) return i.config.fallbackMessage;
+  constructor(private providerName = 'local') { this.name = providerName === 'local' ? 'local-extractive' : providerName; }
+  async answer(i: LlmInput) {
+    if (!i.context.length && !i.history?.length) return i.config.fallbackMessage;
+    if (/\b(summarize|recap|what did i|what you just)\b/i.test(i.question) && i.history?.length)
+      return i.history.slice(-4).map((x) => x.content).join(' ');
     const terms = new Set(i.question.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
-    const sentences = i.context
-      .flatMap((c) => c.text.split(/(?<=[.!?])\s+/))
+    const sentences = [...i.context.flatMap((c) => c.text.split(/(?<=[.!?])\s+/)), ...(i.history ?? []).map((x) => x.content)]
       .map((s) => ({ s, hit: [...terms].filter((t) => s.toLowerCase().includes(t)).length }))
-      .filter((x) => x.hit > 0)
-      .sort((a, b) => b.hit - a.hit)
-      .slice(0, 3);
+      .filter((x) => x.hit > 0).sort((a, b) => b.hit - a.hit).slice(0, 3);
     return sentences.length ? sentences.map((x) => x.s).join(' ') : i.config.fallbackMessage;
   }
-  async health(): Promise<ProviderHealth> {
-    return {
-      provider: this.name,
-      type: 'local',
-      connected: true,
-      configured: true,
-      reachable: true,
-      authentication: 'not-required',
-      status: 'ready',
-    };
+  async streamAnswer(i: LlmInput, onToken: (token: string) => void) {
+    const answer = await this.answer(i);
+    for (const token of answer.match(/\S+\s*/g) ?? []) onToken(token);
+    return answer;
   }
+  async health(): Promise<ProviderHealth> { return { provider: this.name, type: 'local', connected: true, configured: true, reachable: true, authentication: 'not-required', status: 'ready' }; }
 }
 
 export class OpenAICompatibleLlm implements LlmProvider {
   readonly name: string;
-  constructor(
-    private config: LlmConfig,
-    private fetchImpl: Fetch = fetch,
-  ) {
-    this.name = config.providerName;
-  }
+  constructor(private config: LlmConfig, private fetchImpl: Fetch = fetch) { this.name = config.providerName; }
   private async request(url: string | URL, init: RequestInit, retries: number): Promise<Response> {
     let last: unknown;
     for (let attempt = 0; attempt <= retries; attempt++) {
-      const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
+      const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
       try {
         const response = await this.fetchImpl(url, { ...init, signal: controller.signal });
         if (!retryable(response.status) || attempt === retries) return response;
         last = new Error(`retryable status ${response.status}`);
       } catch (error) {
         last = error;
-        if (attempt === retries)
-          throw new Error(`LLM request failed after ${attempt + 1} attempt(s)`, { cause: error });
-      } finally {
-        clearTimeout(timer);
-      }
+        if (attempt === retries) throw new Error(`LLM request failed after ${attempt + 1} attempt(s)`, { cause: error });
+      } finally { clearTimeout(timer); }
       await sleep(this.config.retryBaseMs * 2 ** attempt);
     }
     throw last;
   }
-  private url(path: string) {
-    const url = new URL(path.slice(1), `${this.config.baseUrl}/`);
-    for (const [name, value] of Object.entries(this.config.queryParams))
-      url.searchParams.set(name, value);
-    return url;
-  }
-  private headers() {
-    const key = this.config.authScheme
-      ? `${this.config.authScheme} ${this.config.apiKey!}`
-      : this.config.apiKey!;
-    return {
-      ...this.config.headers,
-      [this.config.authHeaderName]: key,
-      'content-type': 'application/json',
-    };
-  }
-  async answer(i: {
-    question: string;
-    prompt: string;
-    context: RetrievedChunk[];
-    config: ClientConfig;
-  }) {
-    if (!i.context.length) return i.config.fallbackMessage;
+  private url(path: string) { const url = new URL(path.slice(1), `${this.config.baseUrl}/`); for (const [name, value] of Object.entries(this.config.queryParams)) url.searchParams.set(name, value); return url; }
+  private headers() { const key = this.config.authScheme ? `${this.config.authScheme} ${this.config.apiKey!}` : this.config.apiKey!; return { ...this.config.headers, [this.config.authHeaderName]: key, 'content-type': 'application/json' }; }
+  private payload(i: LlmInput, stream: boolean) {
     const context = i.context.map((x, n) => `[${n + 1}] ${x.text}`).join('\n');
-    const r = await this.request(
-      this.url(this.config.chatPath),
-      {
-        method: 'POST',
-        headers: this.headers(),
-        body: JSON.stringify({
-          model: this.config.model,
-          temperature: this.config.sampling.temperature,
-          ...(this.config.sampling.topP === undefined ? {} : { top_p: this.config.sampling.topP }),
-          ...(this.config.sampling.maxTokens === undefined
-            ? {}
-            : { max_tokens: this.config.sampling.maxTokens }),
-          stream: this.config.stream,
-          messages: [
-            {
-              role: 'system',
-              content: `${i.prompt}\nUse ONLY the supplied context. If unsupported, respond exactly: ${i.config.fallbackMessage}`,
-            },
-            { role: 'user', content: `Context:\n${context}\n\nQuestion: ${i.question}` },
-          ],
-        }),
-      },
-      this.config.maxRetries,
-    );
+    const messages = [
+      { role: 'system', content: `${i.prompt}\nUse only the supplied tenant knowledge and conversation history. If unsupported, respond exactly: ${i.config.fallbackMessage}` },
+      ...(i.history ?? []).slice(-12).map((x) => ({ role: x.role, content: x.content })),
+      { role: 'user', content: `Tenant knowledge context:\n${context || '(none)'}\n\nQuestion: ${i.question}` },
+    ];
+    return { model: this.config.model, temperature: this.config.sampling.temperature,
+      ...(this.config.sampling.topP === undefined ? {} : { top_p: this.config.sampling.topP }),
+      ...(this.config.sampling.maxTokens === undefined ? {} : { max_tokens: this.config.sampling.maxTokens }), stream, messages };
+  }
+  async answer(i: LlmInput) {
+    if (!i.context.length && !i.history?.length) return i.config.fallbackMessage;
+    const r = await this.request(this.url(this.config.chatPath), { method: 'POST', headers: this.headers(), body: JSON.stringify(this.payload(i, false)) }, this.config.maxRetries);
     if (!r.ok) throw new Error(`LLM provider failed (${r.status})`);
-    if (this.config.stream) {
-      const body = await r.text();
-      return (
-        body
-          .split('\n')
-          .filter((line) => line.startsWith('data: ') && line !== 'data: [DONE]')
-          .map((line) => {
-            try {
-              return (
-                (JSON.parse(line.slice(6)) as { choices?: { delta?: { content?: string } }[] })
-                  .choices?.[0]?.delta?.content ?? ''
-              );
-            } catch {
-              return '';
-            }
-          })
-          .join('') || i.config.fallbackMessage
-      );
-    }
-    const j = (await r.json()) as { choices?: { message?: { content?: string } }[] };
+    const j = await r.json() as { choices?: { message?: { content?: string } }[] };
     return j.choices?.[0]?.message?.content ?? i.config.fallbackMessage;
   }
-  async health(): Promise<ProviderHealth> {
-    const common = {
-      provider: this.config.providerName,
-      type: this.config.providerType,
-      model: this.config.model,
-      baseUrl: this.config.baseUrl,
-      configured: true,
+  async streamAnswer(i: LlmInput, onToken: (token: string) => void) {
+    if (!i.context.length && !i.history?.length) { onToken(i.config.fallbackMessage); return i.config.fallbackMessage; }
+    const r = await this.request(this.url(this.config.chatPath), { method: 'POST', headers: this.headers(), body: JSON.stringify(this.payload(i, true)) }, this.config.maxRetries);
+    if (!r.ok) throw new Error(`LLM provider failed (${r.status})`);
+    if (!r.body) return this.answer(i);
+    const reader = r.body.getReader(); const decoder = new TextDecoder(); let buffer = ''; let answer = '';
+    const emit = (line: string) => {
+      if (!line.startsWith('data: ') || line === 'data: [DONE]') return;
+      try { const token = (JSON.parse(line.slice(6)) as { choices?: { delta?: { content?: string } }[] }).choices?.[0]?.delta?.content ?? ''; if (token) { answer += token; onToken(token); } } catch { /* ignore incomplete provider frames */ }
     };
-    try {
-      const r = await this.request(
-        this.url(this.config.healthPath),
-        { method: 'GET', headers: this.headers() },
-        0,
-      );
-      const authentication = [401, 403].includes(r.status)
-        ? 'rejected'
-        : r.ok
-          ? 'accepted'
-          : 'unknown';
-      return {
-        ...common,
-        connected: r.ok,
-        reachable: true,
-        authentication,
-        status: r.ok
-          ? 'ready'
-          : authentication === 'rejected'
-            ? 'authentication-failed'
-            : 'upstream-error',
-        detail: `diagnostic HTTP ${r.status}`,
-      };
-    } catch (error) {
-      const timeout =
-        error instanceof Error &&
-        (error.name === 'AbortError' || String(error.cause).includes('AbortError'));
-      return {
-        ...common,
-        connected: false,
-        reachable: false,
-        authentication: 'unknown',
-        status: timeout ? 'timeout' : 'unreachable',
-        detail: timeout
-          ? `diagnostic timed out after ${this.config.timeoutMs}ms`
-          : 'diagnostic request failed',
-      };
-    }
+    while (true) { const { value, done } = await reader.read(); buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }); const lines = buffer.split('\n'); buffer = lines.pop() ?? ''; lines.forEach(emit); if (done) break; }
+    if (!answer) { const fallback = i.config.fallbackMessage; onToken(fallback); return fallback; }
+    return answer;
+  }
+  async health(): Promise<ProviderHealth> {
+    const common = { provider: this.config.providerName, type: this.config.providerType, model: this.config.model, baseUrl: this.config.baseUrl, configured: true };
+    try { const r = await this.request(this.url(this.config.healthPath), { method: 'GET', headers: this.headers() }, 0); const authentication = [401, 403].includes(r.status) ? 'rejected' : r.ok ? 'accepted' : 'unknown'; return { ...common, connected: r.ok, reachable: true, authentication, status: r.ok ? 'ready' : authentication === 'rejected' ? 'authentication-failed' : 'upstream-error', detail: `diagnostic HTTP ${r.status}` }; }
+    catch (error) { const timeout = error instanceof Error && (error.name === 'AbortError' || String(error.cause).includes('AbortError')); return { ...common, connected: false, reachable: false, authentication: 'unknown', status: timeout ? 'timeout' : 'unreachable', detail: timeout ? `diagnostic timed out after ${this.config.timeoutMs}ms` : 'diagnostic request failed' }; }
   }
 }
-
-/** Factory boundary: callers only receive the provider abstraction. */
-export function createLlmProvider(config: LlmConfig, fetchImpl: Fetch = fetch): LlmProvider {
-  return config.providerType === 'local'
-    ? new LocalLlm(config.providerName)
-    : new OpenAICompatibleLlm(config, fetchImpl);
-}
+export function createLlmProvider(config: LlmConfig, fetchImpl: Fetch = fetch): LlmProvider { return config.providerType === 'local' ? new LocalLlm(config.providerName) : new OpenAICompatibleLlm(config, fetchImpl); }
