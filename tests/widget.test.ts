@@ -20,6 +20,15 @@ describe('customer widget streaming UX', () => {
     expect(widget).toContain('Sorry, I couldn’t complete that response.');
   });
 
+  it('renders a compact dynamic AI launcher with keyboard and touch affordances', () => {
+    expect(widget).toContain('class="tai-launch" type="button"');
+    expect(widget).toContain('class="tai-launch-label">AI</span>');
+    expect(widget).toContain('aria-label="Open ${esc(name)} assistant"');
+    expect(widget).toContain('.tai-launch:hover');
+    expect(widget).toContain('.tai-launch:focus-visible');
+    expect(widget).toContain('launch.onclick=()=>{section.hidden=!section.hidden');
+  });
+
   it('keeps tenant identity dynamic and applies scoped glass/mobile styling', () => {
     expect(widget).toContain('w.assistantName || config.assistantName');
     expect(widget).toContain('backdrop-filter:blur');

@@ -26,6 +26,13 @@ export async function publicRoutes(app: FastifyInstance, c: Context) {
   });
   app.post('/chat/stream', async (req, reply) => {
     const b = chatSchema.parse(req.body);
+    // Hijacking bypasses Fastify's normal response hooks, so preserve the
+    // already-authorized exact origin for browser-readable tenant streaming.
+    const origin = req.headers.origin;
+    if (typeof origin === 'string') {
+      reply.raw.setHeader('access-control-allow-origin', origin);
+      reply.raw.setHeader('vary', 'Origin');
+    }
     reply.hijack();
     reply.raw.statusCode = 200;
     reply.raw.setHeader('content-type', 'text/event-stream; charset=utf-8');
