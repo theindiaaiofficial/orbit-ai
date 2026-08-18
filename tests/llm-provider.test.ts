@@ -55,6 +55,46 @@ describe('generic LLM provider configuration and adapter', () => {
       /Missing non-local LLM configuration/,
     );
   });
+  it('sends a no-context message to the LLM instead of terminating with the RAG fallback', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ choices: [{ message: { content: 'Hello! How can I help?' } }] }));
+    const p = createLlmProvider(loadLlmConfig(input), fetchMock);
+    await expect(p.answer({ ...answerInput, question: 'hello', context: [] })).resolves.toBe('Hello! How can I help?');
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+    const request = JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body));
+    expect(request.messages.at(-1).content).toContain('Question: hello');
+  });
+  it('answers explicit identity questions with the current tenant identity', async () => {
+    const questions = [
+      'Who are you?', 'What are you?', 'What is your name?', 'Are you ChatGPT?',
+      'Are you Gemini?', 'Are you Claude?', 'Who created you?', 'Which AI model are you?',
+      'What company do you belong to?', 'Tell me about yourself.',
+    ];
+    const tenantA = { assistantName: 'BluePeak AI Assistant', companyName: 'BluePeak', fallbackMessage: 'unknown' };
+    const tenantB = { assistantName: 'Acme Helpdesk', companyName: 'Acme', fallbackMessage: 'unknown' };
+    const local = createLlmProvider(loadLlmConfig({}), vi.fn());
+    for (const question of questions) {
+      const a = await local.answer({ ...answerInput, question, config: tenantA });
+      const b = await local.answer({ ...answerInput, question, config: tenantB });
+      expect(a).toContain("BluePeak's AI assistant");
+      expect(b).toContain("Acme's AI assistant");
+      expect(a).not.toMatch(/chatgpt|gemini|claude|openai/i);
+      expect(b).not.toMatch(/chatgpt|gemini|claude|openai/i);
+      expect(a).not.toContain('Acme');
+      expect(b).not.toContain('BluePeak');
+    }
+    const streamed: string[] = [];
+    await local.streamAnswer({ ...answerInput, question: 'Are you ChatGPT?', config: tenantA }, (token) => streamed.push(token));
+    expect(streamed.join('')).toContain("BluePeak's AI assistant");
+  });
+  it('puts tenant identity policy ahead of tenant prompt for indirect identity questions', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(Response.json({ choices: [{ message: { content: 'role answer' } }] }));
+    const p = createLlmProvider(loadLlmConfig(input), fetchMock);
+    await p.answer({ ...answerInput, question: 'Can you describe your role?', config: { ...answerInput.config, companyName: 'BluePeak', assistantName: 'BluePeak AI Assistant' } });
+    const request = JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body));
+    expect(request.messages[0].content).toContain('BluePeak');
+    expect(request.messages[0].content).toContain('BluePeak AI Assistant');
+    expect(request.messages[0].content).toContain('Do not present the underlying language model');
+  });
   it('sends compatible requests and retries a transient response', async () => {
     const fetchMock = vi
       .fn()
