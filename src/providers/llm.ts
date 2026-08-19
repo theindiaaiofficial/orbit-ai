@@ -115,7 +115,15 @@ export class OpenAICompatibleLlm implements LlmProvider {
       try { const token = (JSON.parse(line.slice(6)) as { choices?: { delta?: { content?: string } }[] }).choices?.[0]?.delta?.content ?? ''; if (token) { answer += token; onToken(token); } } catch { /* ignore incomplete provider frames */ }
     };
     while (true) { const { value, done } = await reader.read(); buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }); const lines = buffer.split('\n'); buffer = lines.pop() ?? ''; lines.forEach(emit); if (done) break; }
-    if (!answer) { const fallback = i.config.fallbackMessage; onToken(fallback); return fallback; }
+    if (!answer) {
+      // Some OpenAI-compatible gateways advertise streaming but emit no parseable
+      // delta frames. Recover through the same provider's bounded non-streaming
+      // request rather than incorrectly presenting the tenant fallback as a
+      // successful answer.
+      const recovered = await this.answer(i);
+      if (recovered) onToken(recovered);
+      return recovered;
+    }
     return answer;
   }
   async reformulate(i: LlmInput) {

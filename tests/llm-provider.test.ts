@@ -176,6 +176,16 @@ describe('generic LLM provider configuration and adapter', () => {
     const p = createLlmProvider(loadLlmConfig({ ...input, LLM_MAX_RETRIES: '0' }), stalled);
     await expect(p.answer(answerInput)).rejects.toThrow(/after 1 attempt/);
   });
+  it('recovers through non-streaming when a compatible stream has no content frames', async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(new Response('data: [DONE]\\n\\n', { headers: { 'content-type': 'text/event-stream' } }))
+      .mockResolvedValueOnce(Response.json({ choices: [{ message: { content: 'Recovered grounded answer' } }] }));
+    const p = createLlmProvider(loadLlmConfig(input), fetchMock);
+    const tokens: string[] = [];
+    await expect(p.streamAnswer(answerInput, (token) => tokens.push(token))).resolves.toBe('Recovered grounded answer');
+    expect(tokens.join('')).toBe('Recovered grounded answer');
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
   it('reports reachable authentication failure without exposing credentials', async () => {
     const p = createLlmProvider(
       loadLlmConfig(input),
