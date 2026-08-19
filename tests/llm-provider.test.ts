@@ -62,6 +62,8 @@ describe('generic LLM provider configuration and adapter', () => {
     expect(fetchMock).toHaveBeenCalledTimes(1);
     const request = JSON.parse(String((fetchMock.mock.calls[0]![1] as RequestInit).body));
     expect(request.messages.at(-1).content).toContain('Question: hello');
+    expect(request.messages[0].content).toContain('verified evidence for this tenant');
+    expect(request.messages[0].content).toContain('do not use the fallback merely because');
   });
   it('answers explicit identity questions with the current tenant identity', async () => {
     const questions = [
