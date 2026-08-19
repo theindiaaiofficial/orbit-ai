@@ -87,9 +87,9 @@ export class OpenAICompatibleLlm implements LlmProvider {
   private payload(i: LlmInput, stream: boolean) {
     const context = i.context.map((x, n) => `[${n + 1}] ${x.text}`).join('\n');
     const messages = [
-      { role: 'system', content: `${tenantIdentityPolicy(i.config)}\n${i.prompt}\nGrounding rules: the tenant knowledge block is verified evidence for this tenant. If it contains evidence that answers the question, answer directly using that evidence and preserve precise values, prices, dates, and requirements; do not use the fallback merely because the question is phrased differently from the evidence. Use conversation history to resolve references and follow-ups. For greetings and general conversational requests, respond naturally without requiring tenant knowledge. If a company-specific fact is not supported by the supplied tenant knowledge, say that it is unavailable and do not invent it; use this limitation wording when appropriate: ${i.config.fallbackMessage}` },
+      { role: 'system', content: `${tenantIdentityPolicy(i.config)}\n${i.prompt}\nGrounding rules: the following tenant knowledge is verified evidence for this tenant and must be treated as the authoritative source for company-specific facts. If it contains evidence that answers the question, answer directly using that evidence and preserve precise values, prices, dates, and requirements; do not use the fallback merely because the question is phrased differently from the evidence. Use conversation history to resolve references and follow-ups. For greetings and general conversational requests, respond naturally without requiring tenant knowledge. If a company-specific fact is not supported by the supplied tenant knowledge, say that it is unavailable and do not invent it; use this limitation wording when appropriate: ${i.config.fallbackMessage}\n\nVerified tenant knowledge:\n${context || '(none)'}` },
       ...(i.history ?? []).slice(-12).map((x) => ({ role: x.role, content: x.content })),
-      { role: 'user', content: `Tenant knowledge context:\n${context || '(none)'}\n\nQuestion: ${i.question}` },
+      { role: 'user', content: `Question: ${i.question}` },
     ];
     return { model: this.config.model, temperature: this.config.sampling.temperature,
       ...(this.config.sampling.topP === undefined ? {} : { top_p: this.config.sampling.topP }),
