@@ -398,23 +398,8 @@ function Clients({
         }),
       });
 
-      console.log('[DEBUG][Dashboard.create-client.response]', {
-        clientId: r?.client?.id,
-        apiKeyExists: Boolean(r?.apiKey),
-        apiKeyPreview: r?.apiKey ? `${r.apiKey.slice(0, 8)}...` : null,
-        embedCodeExists: Boolean(r?.embedCode),
-        embedCodeHasPlaceholder: r?.embedCode?.includes('YOUR_API_KEY') ?? null,
-        embedCode: r?.embedCode,
-      });
-
       setModal(false);
       load();
-
-      console.log('[DEBUG][Dashboard.create-client.before-setCopyOnce]', {
-        apiKeyExists: Boolean(r.apiKey),
-        embedCodeExists: Boolean(r.embedCode),
-        embedCode: r.embedCode,
-      });
 
       setCopyOnce({
         clientName: r.client.name,
@@ -997,38 +982,12 @@ function Widget({ client, refresh }: { client?: Client; refresh: () => void }) {
         method: 'POST',
       });
 
-      console.log('[DEBUG][Widget.rotate.response]', {
-        clientId: client.id,
-        apiKeyExists: Boolean(r?.apiKey),
-        apiKeyPreview: r?.apiKey ? `${r.apiKey.slice(0, 8)}...` : null,
-        embedCodeExists: Boolean(r?.embedCode),
-        embedCodeHasPlaceholder: r?.embedCode?.includes('YOUR_API_KEY') ?? null,
-        embedCode: r?.embedCode,
-      });
-
-      console.log('[DEBUG][Widget.rotate.before-setSnippet]', {
-        snippetExists: Boolean(r?.embedCode),
-        snippetHasPlaceholder: r?.embedCode?.includes('YOUR_API_KEY') ?? null,
-      });
-
-      console.log('[DEBUG][Widget.rotate.after-setSnippet]', {
-        message: 'setSnippet called',
-      });
-
       setSnippet(typeof r?.embedCode === 'string' ? r.embedCode : '');
       toast.success('New embed code generated. The previous key is no longer valid.');
     } catch (e) {
       toast.error((e as Error).message);
     }
   }
-
-  console.log('[DEBUG][Widget.render]', {
-    clientId: client?.id,
-    snippetExists: Boolean(snippet),
-    snippetHasPlaceholder: String(snippet ?? '').includes('YOUR_API_KEY'),
-    snippetPreview: snippet,
-  });
-
   return (
     <NeedClient client={client}>
       <Header

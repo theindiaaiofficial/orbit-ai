@@ -6,6 +6,7 @@ import { AppError } from '../lib/errors.js';
 import { z } from 'zod';
 import { loadLlmConfig } from '../config/llm.js';
 import { createLlmProvider } from '../providers/llm.js';
+import { groundingCorrection, validateGrounding } from '../services/grounding.js';
 type LeadRow = Record<string, unknown> & { id: string; status: string; conversationId?: string };
 
 const idParams = z.object({ id: z.string().uuid() });
@@ -218,13 +219,19 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
       },
       'prompt preview retrieval',
     );
+    const input = {
+      question: body.question,
+      prompt: body.prompt,
+      context,
+      config: x.config,
+    };
+    let answer = await c.llm.answer(input);
+    const check = validateGrounding(body.question, answer, context);
+    if (!check.ok) answer = await c.llm.answer({ ...input, prompt: `${body.prompt}\n\n${groundingCorrection(check.reasons)}` });
+    const finalCheck = validateGrounding(body.question, answer, context);
+    if (!finalCheck.ok) answer = x.config.fallbackMessage ?? 'I’m sorry, I don’t have that information in the current tenant knowledge.';
     return {
-      answer: await c.llm.answer({
-        question: body.question,
-        prompt: body.prompt,
-        context,
-        config: x.config,
-      }),
+      answer,
       retrieval: {
         count: context.length,
         sources: context.map((chunk, index) => ({
