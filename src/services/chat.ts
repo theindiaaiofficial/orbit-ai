@@ -55,11 +55,21 @@ export class ChatService {
       const [fallbackQ] = await this.embedding.embed([message]);
       candidates = await this.vector.search(clientId, fallbackQ!, k, client.config.minSimilarity ?? 0.05);
     }
-    if (!candidates.length && this.isKnowledgeQuestion(message) && this.llm.reformulate) {
-      const reformulated = await this.llm.reformulate({ question: message, prompt: client.prompt, context: [], config: client.config, history });
+    const knowledgeQuestion = this.isKnowledgeQuestion(message);
+    const initialEvidence = this.selectEvidence(candidates, query);
+    const queryTerms = new Set(message.toLowerCase().match(/[\\p{L}\\p{N}]{3,}/gu) ?? []);
+    const hasSemanticAnchor = initialEvidence.some((chunk) => [...queryTerms].some((term) => chunk.text.toLowerCase().includes(term)));
+    // A vector hit is not proof that the hit is useful. If the bounded candidate
+    // set contains no lexical anchor for a knowledge question, spend one
+    // context-aware reformulation pass before falling back. This fixes false
+    // fallbacks without raising K, weakening tenant filters, or bypassing RAG.
+    if (knowledgeQuestion && !hasSemanticAnchor && this.llm.reformulate) {
+      const reformulated = await this.llm.reformulate({ question: message, prompt: client.prompt, context: initialEvidence, config: client.config, history });
       if (reformulated) {
         const [fallbackQ] = await this.embedding.embed([reformulated]);
         candidates = await this.vector.search(clientId, fallbackQ!, k, client.config.minSimilarity ?? 0.05);
+      } else if (!hasSemanticAnchor) {
+        candidates = [];
       }
     }
     return { client, sid, conversationId, history, candidates, evidence: this.selectEvidence(candidates, query), started, question: message };
