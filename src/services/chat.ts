@@ -38,7 +38,7 @@ export class ChatService {
     let found = await this.vector.search(
       clientId,
       q!,
-      client.config.topK ?? 4,
+      client.config.topK ?? 10,
       client.config.minSimilarity ?? 0.05,
     );
     // A short/pronominal follow-up can be poorly represented by its surface text.
@@ -48,11 +48,33 @@ export class ChatService {
       found = await this.vector.search(
         clientId,
         fallbackQ!,
-        client.config.topK ?? 4,
+        client.config.topK ?? 10,
         client.config.minSimilarity ?? 0.05,
       );
     }
+    // Only knowledge-shaped misses get one provider-assisted reformulation.
+    // Greetings/general conversation go straight to the normal LLM path.
+    if (!found.length && this.isKnowledgeQuestion(message)) {
+      const reformulated = await this.llm.reformulate?.({
+        question: message, prompt: client.prompt, context: [], config: client.config, history,
+      });
+      if (reformulated) {
+        const [fallbackQ] = await this.embedding.embed([reformulated]);
+        found = await this.vector.search(
+          clientId,
+          fallbackQ!,
+          client.config.topK ?? 10,
+          client.config.minSimilarity ?? 0.05,
+        );
+      }
+    }
     return { client, sid, conversationId, history, found, started: Date.now() };
+  }
+
+  private isKnowledgeQuestion(message: string) {
+    const text = message.trim().toLowerCase();
+    if (/^(hi|hello|hey|thanks|thank you|okay|ok|good morning|good afternoon|good evening|who are you|can you help me)[!.? ]*$/i.test(text)) return false;
+    return /\b(price|pricing|cost|service|services|offer|provide|policy|policies|hours|open|close|warranty|refund|return|book|booking|schedule|contact|phone|email|address|location|available|availability|emergency|company|product|plan|support|delivery|shipping|membership|rate|fee|how much|where|when|what do you)\b/i.test(text);
   }
 
   private retrievalQuery(message: string, history: ChatMessage[]) {
