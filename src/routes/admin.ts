@@ -206,7 +206,7 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
     const context = await c.vector.search(
       id,
       query!,
-      x.config.topK ?? 10,
+      x.config.topK ?? 20,
       x.config.minSimilarity ?? 0.05,
     );
     req.log.info(

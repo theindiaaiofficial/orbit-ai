@@ -38,7 +38,7 @@ export class ChatService {
     let found = await this.vector.search(
       clientId,
       q!,
-      client.config.topK ?? 10,
+      client.config.topK ?? 20,
       client.config.minSimilarity ?? 0.05,
     );
     // A short/pronominal follow-up can be poorly represented by its surface text.
@@ -48,7 +48,7 @@ export class ChatService {
       found = await this.vector.search(
         clientId,
         fallbackQ!,
-        client.config.topK ?? 10,
+        client.config.topK ?? 20,
         client.config.minSimilarity ?? 0.05,
       );
     }
@@ -63,7 +63,7 @@ export class ChatService {
         found = await this.vector.search(
           clientId,
           fallbackQ!,
-          client.config.topK ?? 10,
+          client.config.topK ?? 20,
           client.config.minSimilarity ?? 0.05,
         );
       }
