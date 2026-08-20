@@ -74,7 +74,7 @@ export const configSchema = z
       .strict()
       .optional(),
 
-    topK: z.number().int().min(1).max(10).optional(),
+    topK: z.number().int().min(1).max(40).optional(),
     minSimilarity: z.number().min(-1).max(1).optional(),
   })
   .strict();
