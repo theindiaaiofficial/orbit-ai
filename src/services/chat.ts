@@ -51,6 +51,7 @@ export class ChatService {
     const k = Math.min(client.config.topK ?? MAX_CANDIDATES, MAX_CANDIDATES);
     const [q] = await this.embedding.embed([query]);
     let candidates = await this.vector.search(clientId, q!, k, client.config.minSimilarity ?? 0.05);
+    console.info(JSON.stringify({ event: 'retrieval.initial', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), embeddingDimension: q?.length ?? 0, topK: k, minSimilarity: client.config.minSimilarity ?? 0.05, candidateCount: candidates.length, scores: candidates.slice(0, 12).map((x) => Number(x.score.toFixed(4))), chunkIds: candidates.slice(0, 12).map((x) => x.id) }));
     if (!candidates.length && query !== message) {
       const [fallbackQ] = await this.embedding.embed([message]);
       candidates = await this.vector.search(clientId, fallbackQ!, k, client.config.minSimilarity ?? 0.05);
@@ -72,7 +73,9 @@ export class ChatService {
         candidates = [];
       }
     }
-    return { client, sid, conversationId, history, candidates, evidence: this.selectEvidence(candidates, query), started, question: message };
+    const evidence = this.selectEvidence(candidates, query);
+    console.info(JSON.stringify({ event: 'retrieval.final', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), candidateCount: candidates.length, evidenceCount: evidence.length, evidenceIds: evidence.map((x) => x.id), evidenceScores: evidence.map((x) => Number(x.score.toFixed(4))), fallback: knowledgeQuestion && !evidence.length ? 'no-evidence' : 'none' }));
+    return { client, sid, conversationId, history, candidates, evidence, started, question: message };
   }
 
   private input(p: Prepared, prompt = p.client.prompt): LlmInput {
