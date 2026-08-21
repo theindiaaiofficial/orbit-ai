@@ -20,6 +20,10 @@ function professionalFallback(client: Client) {
     : `I don’t have verified information about that in the information provided by ${company}. Please contact ${company} directly through its official support channel for the most accurate answer.`;
 }
 
+function isGenericFallback(answer: string) {
+  return /\b(?:sorry|apolog(?:y|ize|ise)|don['’]?t|do not)\b[\s,]*(?:have|know|possess)|\b(?:no|not)\s+(?:verified\s+)?information\b/i.test(answer);
+}
+
 /** Tenant-scoped conversation orchestration with bounded recall and conservative grounding. */
 export class ChatService {
   constructor(private repo: Repository, private embedding: EmbeddingProvider, private vector: VectorProvider, private llm: LlmProvider) {}
@@ -103,10 +107,10 @@ export class ChatService {
     let answer = await this.llm.answer(this.input(p));
     if (!knowledgeQuestion) return answer;
     let check = validateGrounding(p.question, answer, p.evidence);
-    if (!check.ok) {
+    if (!check.ok || isGenericFallback(answer)) {
       answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons)}`));
       check = validateGrounding(p.question, answer, p.evidence);
-      if (!check.ok) return professionalFallback(p.client);
+      if (!check.ok || isGenericFallback(answer)) return professionalFallback(p.client);
     }
     return answer;
   }
@@ -132,10 +136,10 @@ export class ChatService {
       answer = await this.llm.streamAnswer(this.input(p), (token) => buffered.push(token));
       if (this.isKnowledgeQuestion(message)) {
         let check = validateGrounding(message, answer, p.evidence);
-        if (!check.ok) {
-          answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons)}`));
+        if (!check.ok || isGenericFallback(answer)) {
+          answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons.length ? check.reasons : ['generic fallback despite tenant evidence'])}`));
           check = validateGrounding(message, answer, p.evidence);
-          if (!check.ok) answer = professionalFallback(p.client);
+          if (!check.ok || isGenericFallback(answer)) answer = professionalFallback(p.client);
         }
       }
     }
