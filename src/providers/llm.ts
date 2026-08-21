@@ -133,7 +133,7 @@ export class OpenAICompatibleLlm implements LlmProvider {
     const payload = {
       model: this.config.model, temperature: 0, max_tokens: 80, stream: false,
       messages: [
-        { role: 'system', content: 'Convert the user request into one concise search query for the current tenant knowledge base. Resolve pronouns using the conversation. Return only the query, with no explanation. If this is a greeting or general conversational request, return NONE.' },
+        { role: 'system', content: 'Convert the user request into one concise search query for the current tenant knowledge base. Resolve pronouns using the conversation. Return up to three concise alternative search queries, one per line, with no numbering or explanation. Resolve pronouns using the conversation. If this is a greeting or general conversational request, return NONE.' },
         { role: 'user', content: `Conversation:\n${history || '(none)'}\nCurrent request: ${i.question}` },
       ],
     };

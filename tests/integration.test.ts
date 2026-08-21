@@ -192,7 +192,8 @@ describe('integration/e2e', () => {
       headers: { 'x-api-key': bKey, origin: 'https://beta.example' },
       payload: { message: 'What are Alpha support hours?' },
     });
-    expect(r.json().answer).toBe('I do not know.');
+    expect(r.json().answer).toContain('provided by Beta');
+    expect(r.json().answer).not.toContain('I’m sorry, I don’t have that information.');
   });
   it('persists lead and simulates notification safely', async () => {
     const r = await app.inject({

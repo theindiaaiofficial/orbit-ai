@@ -10,7 +10,15 @@ import { groundingCorrection, validateGrounding } from './grounding.js';
 const MAX_CANDIDATES = 40;
 const MAX_EVIDENCE = 12;
 
-type Prepared = { client: Client; sid: string; conversationId: string; history: ChatMessage[]; evidence: RetrievedChunk[]; candidates: RetrievedChunk[]; started: number; question: string };
+type Prepared = { client: Client; sid: string; conversationId: string; history: ChatMessage[]; evidence: RetrievedChunk[]; candidates: RetrievedChunk[]; started: number; question: string; fallbackReason?: string };
+
+function professionalFallback(client: Client) {
+  const company = client.config.companyName?.trim() || client.name;
+  const contact = client.config.teamEmail?.trim();
+  return contact
+    ? `I don’t have verified information about that in the information provided by ${company}. For the most accurate answer, please contact ${company} directly at ${contact}.`
+    : `I don’t have verified information about that in the information provided by ${company}. Please contact ${company} directly through its official support channel for the most accurate answer.`;
+}
 
 /** Tenant-scoped conversation orchestration with bounded recall and conservative grounding. */
 export class ChatService {
@@ -49,33 +57,40 @@ export class ChatService {
     const history = prior.slice(-12);
     const query = this.retrievalQuery(message, history);
     const k = Math.min(client.config.topK ?? MAX_CANDIDATES, MAX_CANDIDATES);
+    const threshold = client.config.minSimilarity ?? 0.05;
     const [q] = await this.embedding.embed([query]);
-    let candidates = await this.vector.search(clientId, q!, k, client.config.minSimilarity ?? 0.05);
+    let candidates = await this.vector.search(clientId, q!, k, threshold);
+    let evidenceQuery = query;
+    let reformulatedQueries: string[] = [];
     console.info(JSON.stringify({ event: 'retrieval.initial', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), embeddingDimension: q?.length ?? 0, topK: k, minSimilarity: client.config.minSimilarity ?? 0.05, candidateCount: candidates.length, scores: candidates.slice(0, 12).map((x) => Number(x.score.toFixed(4))), chunkIds: candidates.slice(0, 12).map((x) => x.id) }));
     if (!candidates.length && query !== message) {
-      const [fallbackQ] = await this.embedding.embed([message]);
-      candidates = await this.vector.search(clientId, fallbackQ!, k, client.config.minSimilarity ?? 0.05);
+      const [messageQ] = await this.embedding.embed([message]);
+      candidates = await this.vector.search(clientId, messageQ!, k, threshold);
     }
     const knowledgeQuestion = this.isKnowledgeQuestion(message);
     const initialEvidence = this.selectEvidence(candidates, query);
     const queryTerms = new Set(message.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
     const hasSemanticAnchor = initialEvidence.some((chunk) => [...queryTerms].some((term) => chunk.text.toLowerCase().includes(term)));
-    // A vector hit is not proof that the hit is useful. If the bounded candidate
-    // set contains no lexical anchor for a knowledge question, spend one
-    // context-aware reformulation pass before falling back. This fixes false
-    // fallbacks without raising K, weakening tenant filters, or bypassing RAG.
+    // A retrieval miss or irrelevant hit means only that this query failed. It
+    // does not prove that the tenant lacks the information. Make one provider
+    // call that may return up to three concise alternatives, then run each
+    // through the same tenant-scoped vector provider. Never loop.
     if (knowledgeQuestion && !hasSemanticAnchor && this.llm.reformulate) {
       const reformulated = await this.llm.reformulate({ question: message, prompt: client.prompt, context: initialEvidence, config: client.config, history });
-      if (reformulated) {
-        const [fallbackQ] = await this.embedding.embed([reformulated]);
-        candidates = await this.vector.search(clientId, fallbackQ!, k, client.config.minSimilarity ?? 0.05);
-      } else if (!hasSemanticAnchor) {
-        candidates = [];
+      reformulatedQueries = (reformulated ?? '').split(/\r?\n|\s*\|\s*/).map((x) => x.trim().replace(/^[-*\d.)]+\s*/, '')).filter((x) => x && x.toUpperCase() !== 'NONE').slice(0, 3);
+      const retryResults: RetrievedChunk[] = [];
+      for (const alternative of reformulatedQueries) {
+        const [alternativeQ] = await this.embedding.embed([alternative]);
+        retryResults.push(...await this.vector.search(clientId, alternativeQ!, k, threshold));
+      }
+      if (retryResults.length) {
+        candidates = [...candidates, ...retryResults].filter((chunk, index, all) => all.findIndex((x) => x.id === chunk.id) === index);
+        evidenceQuery = reformulatedQueries[0] ?? query;
       }
     }
-    const evidence = this.selectEvidence(candidates, query);
-    console.info(JSON.stringify({ event: 'retrieval.final', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), candidateCount: candidates.length, evidenceCount: evidence.length, evidenceIds: evidence.map((x) => x.id), evidenceScores: evidence.map((x) => Number(x.score.toFixed(4))), fallback: knowledgeQuestion && !evidence.length ? 'no-evidence' : 'none' }));
-    return { client, sid, conversationId, history, candidates, evidence, started, question: message };
+    const evidence = this.selectEvidence(candidates, evidenceQuery);
+    console.info(JSON.stringify({ event: 'retrieval.final', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), reformulatedQueries: reformulatedQueries.map((x) => x.slice(0, 240)), candidateCount: candidates.length, evidenceCount: evidence.length, evidenceIds: evidence.map((x) => x.id), evidenceScores: evidence.map((x) => Number(x.score.toFixed(4))), fallback: knowledgeQuestion && !evidence.length ? 'no-verified-evidence-after-bounded-reformulation' : 'none' }));
+    return { client, sid, conversationId, history, candidates, evidence, started, question: message, fallbackReason: knowledgeQuestion && !evidence.length ? 'no-verified-evidence-after-bounded-reformulation' : undefined };
   }
 
   private input(p: Prepared, prompt = p.client.prompt): LlmInput {
@@ -84,14 +99,14 @@ export class ChatService {
 
   private async groundedAnswer(p: Prepared) {
     const knowledgeQuestion = this.isKnowledgeQuestion(p.question);
-    if (knowledgeQuestion && !p.evidence.length) return p.client.config.fallbackMessage;
+    if (knowledgeQuestion && !p.evidence.length) return professionalFallback(p.client);
     let answer = await this.llm.answer(this.input(p));
     if (!knowledgeQuestion) return answer;
     let check = validateGrounding(p.question, answer, p.evidence);
     if (!check.ok) {
       answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons)}`));
       check = validateGrounding(p.question, answer, p.evidence);
-      if (!check.ok) return p.client.config.fallbackMessage;
+      if (!check.ok) return professionalFallback(p.client);
     }
     return answer;
   }
@@ -112,7 +127,7 @@ export class ChatService {
     const p = await this.prepare(clientId, message, sessionId);
     let answer: string;
     const buffered: string[] = [];
-    if (this.isKnowledgeQuestion(message) && !p.evidence.length) answer = p.client.config.fallbackMessage;
+    if (this.isKnowledgeQuestion(message) && !p.evidence.length) answer = professionalFallback(p.client);
     else {
       answer = await this.llm.streamAnswer(this.input(p), (token) => buffered.push(token));
       if (this.isKnowledgeQuestion(message)) {
@@ -120,7 +135,7 @@ export class ChatService {
         if (!check.ok) {
           answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons)}`));
           check = validateGrounding(message, answer, p.evidence);
-          if (!check.ok) answer = p.client.config.fallbackMessage;
+          if (!check.ok) answer = professionalFallback(p.client);
         }
       }
     }

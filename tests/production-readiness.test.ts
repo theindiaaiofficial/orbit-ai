@@ -217,7 +217,8 @@ describe('two-tenant production-readiness regressions', () => {
       headers: { origin: brightSmileOrigin, 'x-api-key': brightSmileKey },
       payload: { message: 'Northstar Solar installs HelioPeak panels with a 27-year warranty.' },
     });
-    expect(brightSmileCross.json().answer).toBe('Not found in BrightSmile knowledge.');
+    expect(brightSmileCross.json().answer).toContain('provided by BrightSmile Dental');
+    expect(brightSmileCross.json().answer).not.toContain('I’m sorry, I don’t have that information.');
 
     const reusedSession = await app.inject({
       method: 'POST',
@@ -228,7 +229,8 @@ describe('two-tenant production-readiness regressions', () => {
         message: 'Northstar Solar installs HelioPeak panels with a 27-year warranty.',
       },
     });
-    expect(reusedSession.json().answer).toBe('Not found in BrightSmile knowledge.');
+    expect(reusedSession.json().answer).toContain('provided by BrightSmile Dental');
+    expect(reusedSession.json().answer).not.toContain('I’m sorry, I don’t have that information.');
     expect(reusedSession.json().conversationId).not.toBe(northstarConversationId);
   });
 

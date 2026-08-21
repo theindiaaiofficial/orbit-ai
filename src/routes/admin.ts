@@ -9,6 +9,14 @@ import { createLlmProvider } from '../providers/llm.js';
 import { groundingCorrection, validateGrounding } from '../services/grounding.js';
 type LeadRow = Record<string, unknown> & { id: string; status: string; conversationId?: string };
 
+function professionalFallback(client: { name: string; config: { companyName?: string; teamEmail?: string } }) {
+  const company = client.config.companyName?.trim() || client.name;
+  const contact = client.config.teamEmail?.trim();
+  return contact
+    ? `I don’t have verified information about that in the information provided by ${company}. For the most accurate answer, please contact ${company} directly at ${contact}.`
+    : `I don’t have verified information about that in the information provided by ${company}. Please contact ${company} directly through its official support channel for the most accurate answer.`;
+}
+
 const idParams = z.object({ id: z.string().uuid() });
 const listQuery = z.object({
   q: z.string().max(120).default(''),
@@ -229,7 +237,7 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
     const check = validateGrounding(body.question, answer, context);
     if (!check.ok) answer = await c.llm.answer({ ...input, prompt: `${body.prompt}\n\n${groundingCorrection(check.reasons)}` });
     const finalCheck = validateGrounding(body.question, answer, context);
-    if (!finalCheck.ok) answer = x.config.fallbackMessage ?? 'I’m sorry, I don’t have that information in the current tenant knowledge.';
+    if (!finalCheck.ok) answer = professionalFallback(x);
     return {
       answer,
       retrieval: {
