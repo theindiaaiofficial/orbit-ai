@@ -105,7 +105,7 @@ export class ChatService {
     const knowledgeQuestion = this.isKnowledgeQuestion(p.question);
     if (knowledgeQuestion && !p.evidence.length) return professionalFallback(p.client);
     let answer = await this.llm.answer(this.input(p));
-    if (!knowledgeQuestion) return answer;
+    if (!knowledgeQuestion) return isGenericFallback(answer) ? professionalFallback(p.client) : answer;
     let check = validateGrounding(p.question, answer, p.evidence);
     if (!check.ok || isGenericFallback(answer)) {
       answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons)}`));
@@ -134,6 +134,7 @@ export class ChatService {
     if (this.isKnowledgeQuestion(message) && !p.evidence.length) answer = professionalFallback(p.client);
     else {
       answer = await this.llm.streamAnswer(this.input(p), (token) => buffered.push(token));
+      if (!this.isKnowledgeQuestion(message) && isGenericFallback(answer)) answer = professionalFallback(p.client);
       if (this.isKnowledgeQuestion(message)) {
         let check = validateGrounding(message, answer, p.evidence);
         if (!check.ok || isGenericFallback(answer)) {
