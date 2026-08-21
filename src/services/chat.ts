@@ -58,7 +58,7 @@ export class ChatService {
     }
     const knowledgeQuestion = this.isKnowledgeQuestion(message);
     const initialEvidence = this.selectEvidence(candidates, query);
-    const queryTerms = new Set(message.toLowerCase().match(/[\\p{L}\\p{N}]{3,}/gu) ?? []);
+    const queryTerms = new Set(message.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
     const hasSemanticAnchor = initialEvidence.some((chunk) => [...queryTerms].some((term) => chunk.text.toLowerCase().includes(term)));
     // A vector hit is not proof that the hit is useful. If the bounded candidate
     // set contains no lexical anchor for a knowledge question, spend one
