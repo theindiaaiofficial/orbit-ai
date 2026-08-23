@@ -37,12 +37,13 @@ const schema = z.object({
     .string()
     .regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/)
     .default('notifications'),
-  TTS_PROVIDER_TYPE: z.enum(['local', 'openai-compatible']).default('local'),
-  TTS_PROVIDER_NAME: z.string().default('local'),
+  // TTS_API_KEY is the only required production TTS setting. Provider details
+  // default internally to Groq and remain overridable for future deployments.
+  TTS_PROVIDER_TYPE: z.enum(['local', 'openai-compatible']).optional(),
+  TTS_PROVIDER_NAME: z.string().optional(),
   TTS_BASE_URL: z.string().url().optional(),
   TTS_MODEL: z.string().optional(),
   TTS_VOICE: z.string().optional(),
-  TTS_API_KEY_ENV: z.string().default('TTS_API_KEY'),
   TTS_API_KEY: z.string().optional(),
   TTS_RESPONSE_FORMAT: z.enum(['wav', 'mp3', 'opus', 'aac', 'flac']).default('wav'),
   TTS_TIMEOUT_MS: z.coerce.number().int().min(100).default(15000),
