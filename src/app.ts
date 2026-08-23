@@ -13,6 +13,7 @@ import { LocalStorage, SupabaseStorage } from './providers/storage.js';
 import { LocalEmbedding, OpenAIEmbedding } from './providers/embedding.js';
 import { LocalVector, QdrantVector, SupabaseVector } from './providers/vector.js';
 import { createLlmProvider } from './providers/llm.js';
+import { createTtsProvider } from './providers/tts.js';
 import {
   OutboxNotification,
   SmtpNotification,
@@ -63,6 +64,7 @@ export async function buildApp(env: Env) {
         ? new SupabaseVector(env.SUPABASE_URL!, supabaseKey)
         : new LocalVector(path.join(env.DATA_DIR, 'vectors.json'));
   const llm = createLlmProvider(env.llm);
+  const tts = createTtsProvider(env.tts);
   const notification =
     env.NOTIFICATION_PROVIDER === 'smtp'
       ? new SmtpNotification({
@@ -86,6 +88,7 @@ export async function buildApp(env: Env) {
     embedding,
     vector,
     llm,
+    tts,
     notification,
     metrics,
     clients,

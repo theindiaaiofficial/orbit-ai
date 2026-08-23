@@ -90,6 +90,7 @@ export const createClientSchema = z
 export const chatSchema = z
   .object({ message: z.string().min(1).max(4000), sessionId: z.string().uuid().optional() })
   .strict();
+export const ttsSchema = z.object({ text: z.string().min(1).max(10000) }).strict();
 export const leadSchema = z
   .object({
     conversationId: z.string().uuid().optional(),
