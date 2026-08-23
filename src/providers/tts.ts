@@ -1,7 +1,7 @@
 import type { ProviderHealth } from '../domain/types.js';
 import type { TtsConfig } from '../config/tts.js';
 export type TtsAudio = { body: Uint8Array; contentType: string };
-export class TtsProviderError extends Error { constructor(public readonly status: number, message = 'TTS provider request failed') { super(message); this.name = 'TtsProviderError'; } }
+export class TtsProviderError extends Error { constructor(public readonly status: number, public readonly detail = 'TTS provider request failed') { super(detail); this.name = 'TtsProviderError'; } }
 export interface TtsProvider { readonly name: string; synthesize(text: string): Promise<TtsAudio>; health(): Promise<ProviderHealth>; }
 export function cleanTtsText(text: string, max = 4000) {
   return text.replace(/```[\s\S]*?```/g, '').replace(/\[\d+\]/g, '').replace(/https?:\/\/\S+/g, '')
@@ -34,7 +34,15 @@ export class OpenAICompatibleTts implements TtsProvider {
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
     try {
       const r = await this.fetchImpl(this.url(this.config.speechPath), { method: 'POST', headers: this.headers(), body: JSON.stringify({ ...speechLocale(clean, { model: this.config.model!, voice: this.config.voice! }), input: clean, response_format: this.config.responseFormat }), signal: controller.signal });
-      if (!r.ok) throw new TtsProviderError(r.status);
+      if (!r.ok) {
+        let detail = 'TTS provider request failed';
+        try {
+          const payload = await r.clone().json() as { error?: { code?: string; message?: string } | string };
+          const e = payload.error;
+          detail = typeof e === 'string' ? e : e?.message ?? e?.code ?? detail;
+        } catch { /* preserve generic detail when upstream is not JSON */ }
+        throw new TtsProviderError(r.status, detail.replace(/[\\r\\n]+/g, ' ').slice(0, 240));
+      }
       return { body: new Uint8Array(await r.arrayBuffer()), contentType: mime[this.config.responseFormat] ?? 'application/octet-stream' };
     } catch (e) { throw new Error('TTS request failed', { cause: e }); } finally { clearTimeout(timer); }
   }
