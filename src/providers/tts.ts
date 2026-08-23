@@ -7,6 +7,17 @@ export function cleanTtsText(text: string, max = 4000) {
     .replace(/[*_~#>`]/g, '').replace(/\s+/g, ' ').trim().slice(0, max);
 }
 const mime: Record<string, string> = { wav: 'audio/wav', mp3: 'audio/mpeg', opus: 'audio/ogg; codecs=opus', aac: 'audio/aac', flac: 'audio/flac' };
+
+type SpeechLocale = { model: string; voice: string };
+const GROQ_ENGLISH: SpeechLocale = { model: 'canopylabs/orpheus-v1-english', voice: 'hannah' };
+const GROQ_ARABIC: SpeechLocale = { model: 'canopylabs/orpheus-arabic-saudi', voice: 'noura' };
+function speechLocale(text: string, configured: SpeechLocale): SpeechLocale {
+  if (/\p{Script=Arabic}/u.test(text)) return configured.model === GROQ_ENGLISH.model ? GROQ_ARABIC : configured;
+  // Orpheus English must not be used for scripts it cannot pronounce reliably.
+  if (/\p{Script=Devanagari}|\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Cyrillic}/u.test(text))
+    throw new Error('TTS language is not supported by the configured voice');
+  return configured;
+}
 export class LocalTts implements TtsProvider {
   readonly name = 'local';
   async synthesize(_text: string): Promise<TtsAudio> { throw new Error('TTS provider is not configured'); }
@@ -21,7 +32,7 @@ export class OpenAICompatibleTts implements TtsProvider {
     const clean = cleanTtsText(text, this.config.maxInputChars); if (!clean) throw new Error('TTS input is empty');
     const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), this.config.timeoutMs);
     try {
-      const r = await this.fetchImpl(this.url(this.config.speechPath), { method: 'POST', headers: this.headers(), body: JSON.stringify({ model: this.config.model, voice: this.config.voice, input: clean, response_format: this.config.responseFormat }), signal: controller.signal });
+      const r = await this.fetchImpl(this.url(this.config.speechPath), { method: 'POST', headers: this.headers(), body: JSON.stringify({ ...speechLocale(clean, { model: this.config.model!, voice: this.config.voice! }), input: clean, response_format: this.config.responseFormat }), signal: controller.signal });
       if (!r.ok) throw new Error(`TTS provider failed (${r.status})`);
       return { body: new Uint8Array(await r.arrayBuffer()), contentType: mime[this.config.responseFormat] ?? 'application/octet-stream' };
     } catch (e) { throw new Error('TTS request failed', { cause: e }); } finally { clearTimeout(timer); }

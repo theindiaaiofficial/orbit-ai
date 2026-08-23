@@ -18,8 +18,11 @@ export type TtsConfig = {
 };
 
 const GROQ_BASE_URL = 'https://api.groq.com/openai/v1';
-const GROQ_MODEL = 'playai-tts';
-const GROQ_VOICE = 'Fritz-PlayAI';
+// Groq retired playai-tts on 2025-12-31. Orpheus is the supported
+// English default; the provider layer can select another supported locale
+// without changing the widget or route contract.
+const GROQ_MODEL = 'canopylabs/orpheus-v1-english';
+const GROQ_VOICE = 'hannah';
 const token = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 function path(value: string | undefined, fallback: string, name: string) {
   const p = value ?? fallback;

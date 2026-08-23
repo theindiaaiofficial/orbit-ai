@@ -8,8 +8,8 @@ describe('provider-agnostic TTS', () => {
     const config = loadTtsConfig({ TTS_API_KEY: env.TTS_API_KEY });
     expect(config.providerName).toBe('groq');
     expect(config.baseUrl).toBe('https://api.groq.com/openai/v1');
-    expect(config.model).toBe('playai-tts');
-    expect(config.voice).toBe('Fritz-PlayAI');
+    expect(config.model).toBe('canopylabs/orpheus-v1-english');
+    expect(config.voice).toBe('hannah');
     expect(config.apiKeyEnv).toBe('TTS_API_KEY');
     expect(() => loadTtsConfig({ TTS_PROVIDER_TYPE: 'openai-compatible' })).toThrow(/TTS_API_KEY/);
   });
