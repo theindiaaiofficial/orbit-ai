@@ -1,5 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import type { Context } from './context.js';
+import { TtsProviderError } from '../providers/tts.js';
 import { hashKey, originMatches } from '../lib/security.js';
 import { AppError } from '../lib/errors.js';
 import { chatSchema, leadSchema, ttsSchema } from '../domain/schemas.js';
@@ -53,7 +54,10 @@ export async function publicRoutes(app: FastifyInstance, c: Context) {
     try {
       const audio = await c.tts.synthesize(b.text);
       return reply.type(audio.contentType).header('cache-control', 'no-store').send(Buffer.from(audio.body));
-    } catch {
+    } catch (error) {
+      // Keep diagnostics server-side and non-secret; the public contract remains generic.
+      if (error instanceof TtsProviderError) app.log.warn({ event: 'tts.provider_error', status: error.status }, 'TTS provider rejected synthesis');
+      else app.log.warn({ event: 'tts.request_error' }, 'TTS synthesis failed');
       throw new AppError(503, 'TTS_UNAVAILABLE', 'Audio is temporarily unavailable');
     }
   });
