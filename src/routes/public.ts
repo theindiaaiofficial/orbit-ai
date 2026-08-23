@@ -56,7 +56,9 @@ export async function publicRoutes(app: FastifyInstance, c: Context) {
       return reply.type(audio.contentType).header('cache-control', 'no-store').send(Buffer.from(audio.body));
     } catch (error) {
       // Keep diagnostics server-side and non-secret; the public contract remains generic.
+      const cause = error instanceof Error ? error.cause : undefined;
       if (error instanceof TtsProviderError) app.log.warn({ event: 'tts.provider_error', status: error.status }, 'TTS provider rejected synthesis');
+      else if (cause instanceof TtsProviderError) app.log.warn({ event: 'tts.provider_error', status: cause.status }, 'TTS provider rejected synthesis');
       else app.log.warn({ event: 'tts.request_error' }, 'TTS synthesis failed');
       throw new AppError(503, 'TTS_UNAVAILABLE', 'Audio is temporarily unavailable');
     }
