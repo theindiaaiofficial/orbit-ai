@@ -9,7 +9,6 @@ export async function systemRoutes(app: FastifyInstance, c: Context) {
       vector: await c.vector.health(),
       embedding: await c.embedding.health(),
       llm: await c.llm.health(),
-      tts: await c.tts.health(),
       notification: await c.notification.health(),
     },
     ...c.metrics.snapshot(),
@@ -21,7 +20,6 @@ export async function systemRoutes(app: FastifyInstance, c: Context) {
       c.vector.health(),
       c.embedding.health(),
       c.llm.health(),
-      c.tts.health(),
       c.notification.health(),
     ]);
     const ready = h.every((x: { connected: boolean }) => x.connected);

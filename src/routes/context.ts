@@ -8,7 +8,6 @@ import type { VectorProvider } from '../providers/vector.js';
 import type { EmbeddingProvider } from '../providers/embedding.js';
 import type { LlmProvider } from '../providers/llm.js';
 import type { NotificationProvider } from '../providers/notification.js';
-import type { TtsProvider } from '../providers/tts.js';
 import type { Metrics } from '../lib/metrics.js';
 export type Context = {
   env: Env;
@@ -21,6 +20,5 @@ export type Context = {
   embedding: EmbeddingProvider;
   llm: LlmProvider;
   notification: NotificationProvider;
-  tts: TtsProvider;
   metrics: Metrics;
 };

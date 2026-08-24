@@ -1,7 +1,6 @@
 import { z } from 'zod';
 import path from 'node:path';
 import { loadLlmConfig, type LlmConfig } from './llm.js';
-import { loadTtsConfig, type TtsConfig } from './tts.js';
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   HOST: z.string().default('0.0.0.0'),
@@ -37,25 +36,9 @@ const schema = z.object({
     .string()
     .regex(/^[a-zA-Z_][a-zA-Z0-9_]*$/)
     .default('notifications'),
-  // TTS_API_KEY is the only required production TTS setting. Provider details
-  // default internally to Groq and remain overridable for future deployments.
-  TTS_PROVIDER_TYPE: z.enum(['local', 'openai-compatible']).optional(),
-  TTS_PROVIDER_NAME: z.string().optional(),
-  TTS_BASE_URL: z.string().url().optional(),
-  TTS_MODEL: z.string().optional(),
-  TTS_VOICE: z.string().optional(),
-  TTS_API_KEY: z.string().optional(),
-  TTS_RESPONSE_FORMAT: z.enum(['wav', 'mp3', 'opus', 'aac', 'flac']).default('wav'),
-  TTS_TIMEOUT_MS: z.coerce.number().int().min(100).default(15000),
-  TTS_MAX_INPUT_CHARS: z.coerce.number().int().min(100).max(10000).default(4000),
-  TTS_SPEECH_PATH: z.string().default('/audio/speech'),
-  TTS_HEALTH_PATH: z.string().default('/models'),
-  TTS_AUTH_HEADER_NAME: z.string().default('authorization'),
-  TTS_AUTH_SCHEME: z.string().default('Bearer'),
 });
 export type Env = Omit<z.infer<typeof schema>, 'CORS_ORIGINS'> & {
   llm: LlmConfig;
-  tts: TtsConfig;
   CORS_ORIGINS: string[];
 };
 export function loadEnv(input: NodeJS.ProcessEnv = process.env): Env {
@@ -95,6 +78,5 @@ export function loadEnv(input: NodeJS.ProcessEnv = process.env): Env {
       .filter(Boolean),
     DATA_DIR: path.resolve(e.DATA_DIR),
     llm: loadLlmConfig(input),
-    tts: loadTtsConfig(input),
   };
 }
