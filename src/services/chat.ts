@@ -73,8 +73,13 @@ export class ChatService {
     }
     const knowledgeQuestion = this.isKnowledgeQuestion(message);
     const initialEvidence = this.selectEvidence(candidates, query);
-    const queryTerms = new Set(message.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
-    const hasSemanticAnchor = initialEvidence.some((chunk) => [...queryTerms].some((term) => chunk.text.toLowerCase().includes(term)));
+    // Common words are not enough to establish that a candidate answers the
+    // question. Require two meaningful terms, or one distinctive term, before
+    // suppressing the one bounded recovery search.
+    const stopTerms = new Set(['about', 'after', 'also', 'are', 'can', 'does', 'from', 'have', 'help', 'how', 'much', 'the', 'their', 'there', 'these', 'this', 'what', 'when', 'where', 'which', 'with', 'you', 'your']);
+    const queryTerms = new Set((message.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter((term) => !stopTerms.has(term)));
+    const anchorCounts = initialEvidence.map((chunk) => [...queryTerms].filter((term) => chunk.text.toLowerCase().includes(term)).length);
+    const hasSemanticAnchor = anchorCounts.some((count) => count >= 2 || (count === 1 && [...queryTerms].some((term) => term.length >= 8)));
     // A retrieval miss or irrelevant hit means only that this query failed. It
     // does not prove that the tenant lacks the information. Make one provider
     // call that may return up to three concise alternatives, then run each
