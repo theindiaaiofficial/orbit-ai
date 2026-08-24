@@ -76,7 +76,7 @@ export class ChatService {
     // Common words are not enough to establish that a candidate answers the
     // question. Require two meaningful terms, or one distinctive term, before
     // suppressing the one bounded recovery search.
-    const stopTerms = new Set(['about', 'after', 'also', 'are', 'can', 'does', 'from', 'have', 'help', 'how', 'much', 'the', 'their', 'there', 'these', 'this', 'what', 'when', 'where', 'which', 'with', 'you', 'your']);
+    const stopTerms = new Set(['about', 'after', 'also', 'are', 'can', 'does', 'from', 'have', 'help', 'how', 'much', 'the', 'their', 'there', 'these', 'this', 'what', 'when', 'where', 'which', 'with', 'you', 'your', 'account', 'company', 'information', 'membership', 'offer', 'plan', 'product', 'service', 'services', 'support']);
     const queryTerms = new Set((message.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter((term) => !stopTerms.has(term)));
     const anchorCounts = initialEvidence.map((chunk) => [...queryTerms].filter((term) => chunk.text.toLowerCase().includes(term)).length);
     const hasSemanticAnchor = anchorCounts.some((count) => count >= 2 || (count === 1 && [...queryTerms].some((term) => term.length >= 8)));
