@@ -45,9 +45,25 @@ export class ChatService {
     const terms = new Set(query.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
     return [...candidates]
       .map((x) => ({ x, lexical: [...terms].filter((t) => x.text.toLowerCase().includes(t)).length }))
-      .sort((a, b) => (b.lexical - a.lexical) || (b.x.score - a.x.score))
+      // Semantic similarity is the primary signal. Lexical overlap is only a
+      // deterministic tie-breaker for near-equal vectors; otherwise generic
+      // words such as “contact” must not displace the relevant chunk.
+      .sort((a, b) => (Math.abs(b.x.score - a.x.score) > 0.05 ? b.x.score - a.x.score : (b.lexical - a.lexical) || (b.x.score - a.x.score)))
       .slice(0, MAX_EVIDENCE)
       .map((x) => x.x);
+  }
+
+  private isSummaryRequest(message: string) {
+    return /\b(?:summari[sz]e|summary|recap|what did we discuss|what have we discussed|summarise this chat)\b/i.test(message);
+  }
+
+  private hasSufficientSemanticEvidence(evidence: RetrievedChunk[], threshold: number) {
+    if (!evidence.length) return false;
+    // The configured threshold is intentionally permissive for candidate
+    // recall. A stronger, generic acceptance floor decides whether the first
+    // query is trustworthy enough to skip the one bounded recovery pass.
+    const floor = Math.max(0.55, threshold + 0.2);
+    return evidence[0]!.score >= floor;
   }
 
   private async prepare(clientId: string, message: string, sessionId?: string): Promise<Prepared> {
@@ -59,32 +75,35 @@ export class ChatService {
     const prior = (await this.repo.messages(conversationId)).slice(-12);
     await this.repo.addMessage(conversationId, 'user', message);
     const history = prior.slice(-12);
+    const summaryRequest = this.isSummaryRequest(message);
     const query = this.retrievalQuery(message, history);
     const k = Math.min(client.config.topK ?? MAX_CANDIDATES, MAX_CANDIDATES);
     const threshold = client.config.minSimilarity ?? 0.05;
-    const [q] = await this.embedding.embed([query]);
-    let candidates = await this.vector.search(clientId, q!, k, threshold);
+    let candidates: RetrievedChunk[] = [];
     let evidenceQuery = query;
     let reformulatedQueries: string[] = [];
-    console.info(JSON.stringify({ event: 'retrieval.initial', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), embeddingDimension: q?.length ?? 0, topK: k, minSimilarity: client.config.minSimilarity ?? 0.05, candidateCount: candidates.length, scores: candidates.slice(0, 12).map((x) => Number(x.score.toFixed(4))), chunkIds: candidates.slice(0, 12).map((x) => x.id) }));
-    if (!candidates.length && query !== message) {
-      const [messageQ] = await this.embedding.embed([message]);
-      candidates = await this.vector.search(clientId, messageQ!, k, threshold);
+    let q: number[] | undefined;
+    const knowledgeQuestion = !summaryRequest && this.isKnowledgeQuestion(message);
+    if (knowledgeQuestion) {
+      [q] = await this.embedding.embed([query]);
+      candidates = await this.vector.search(clientId, q!, k, threshold);
+      console.info(JSON.stringify({ event: 'retrieval.initial', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), embeddingDimension: q?.length ?? 0, topK: k, minSimilarity: client.config.minSimilarity ?? 0.05, candidateCount: candidates.length, scores: candidates.slice(0, 12).map((x) => Number(x.score.toFixed(4))), chunkIds: candidates.slice(0, 12).map((x) => x.id) }));
+      if (!candidates.length && query !== message) {
+        const [messageQ] = await this.embedding.embed([message]);
+        candidates = await this.vector.search(clientId, messageQ!, k, threshold);
+      }
     }
-    const knowledgeQuestion = this.isKnowledgeQuestion(message);
     const initialEvidence = this.selectEvidence(candidates, query);
     // Common words are not enough to establish that a candidate answers the
     // question. Require two meaningful terms, or one distinctive term, before
     // suppressing the one bounded recovery search.
-    const stopTerms = new Set(['about', 'after', 'also', 'are', 'can', 'does', 'from', 'have', 'help', 'how', 'much', 'the', 'their', 'there', 'these', 'this', 'what', 'when', 'where', 'which', 'with', 'you', 'your', 'account', 'company', 'information', 'membership', 'offer', 'plan', 'product', 'service', 'services', 'support']);
-    const queryTerms = new Set((message.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter((term) => !stopTerms.has(term)));
-    const anchorCounts = initialEvidence.map((chunk) => [...queryTerms].filter((term) => chunk.text.toLowerCase().includes(term)).length);
-    const hasSemanticAnchor = anchorCounts.some((count) => count >= 2 || (count === 1 && [...queryTerms].some((term) => term.length >= 8)));
-    // A retrieval miss or irrelevant hit means only that this query failed. It
-    // does not prove that the tenant lacks the information. Make one provider
+    // A retrieval miss or weak semantic hit means only that this query failed;
+    // it does not prove that the tenant lacks the information. Make one provider
     // call that may return up to three concise alternatives, then run each
-    // through the same tenant-scoped vector provider. Never loop.
-    if (knowledgeQuestion && !hasSemanticAnchor && this.llm.reformulate) {
+    // through the same tenant-scoped vector provider. Never loop. Do not use
+    // exact-word overlap as the gate: semantically equivalent tenant wording
+    // is valid evidence even when vocabulary differs.
+    if (knowledgeQuestion && !this.hasSufficientSemanticEvidence(initialEvidence, threshold) && this.llm.reformulate) {
       const reformulated = await this.llm.reformulate({ question: message, prompt: client.prompt, context: initialEvidence, config: client.config, history });
       reformulatedQueries = (reformulated ?? '').split(/\r?\n|\s*\|\s*/).map((x) => x.trim().replace(/^[-*\d.)]+\s*/, '')).filter((x) => x && x.toUpperCase() !== 'NONE').slice(0, 3);
       const retryResults: RetrievedChunk[] = [];
@@ -107,7 +126,7 @@ export class ChatService {
   }
 
   private async groundedAnswer(p: Prepared) {
-    const knowledgeQuestion = this.isKnowledgeQuestion(p.question);
+    const knowledgeQuestion = !this.isSummaryRequest(p.question) && this.isKnowledgeQuestion(p.question);
     if (knowledgeQuestion && !p.evidence.length) return professionalFallback(p.client);
     let answer = await this.llm.answer(this.input(p));
     if (!knowledgeQuestion) return isGenericFallback(answer) ? professionalFallback(p.client) : answer;
@@ -136,11 +155,12 @@ export class ChatService {
     const p = await this.prepare(clientId, message, sessionId);
     let answer: string;
     const buffered: string[] = [];
-    if (this.isKnowledgeQuestion(message) && !p.evidence.length) answer = professionalFallback(p.client);
+    const knowledgeQuestion = !this.isSummaryRequest(message) && this.isKnowledgeQuestion(message);
+    if (knowledgeQuestion && !p.evidence.length) answer = professionalFallback(p.client);
     else {
       answer = await this.llm.streamAnswer(this.input(p), (token) => buffered.push(token));
-      if (!this.isKnowledgeQuestion(message) && isGenericFallback(answer)) answer = professionalFallback(p.client);
-      if (this.isKnowledgeQuestion(message)) {
+      if (!knowledgeQuestion && isGenericFallback(answer)) answer = professionalFallback(p.client);
+      if (knowledgeQuestion) {
         let check = validateGrounding(message, answer, p.evidence);
         if (!check.ok || isGenericFallback(answer)) {
           answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons.length ? check.reasons : ['generic fallback despite tenant evidence'])}`));
