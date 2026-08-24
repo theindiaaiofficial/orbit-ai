@@ -132,7 +132,8 @@ export class ChatService {
     if (!knowledgeQuestion) return isGenericFallback(answer) ? professionalFallback(p.client) : answer;
     let check = validateGrounding(p.question, answer, p.evidence);
     if (!check.ok || isGenericFallback(answer)) {
-      answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons)}`));
+      const reasons = check.reasons.length ? check.reasons : ['generic fallback despite tenant evidence'];
+      answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(reasons)}`));
       check = validateGrounding(p.question, answer, p.evidence);
       if (!check.ok || isGenericFallback(answer)) return professionalFallback(p.client);
     }

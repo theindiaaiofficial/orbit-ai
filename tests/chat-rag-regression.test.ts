@@ -50,6 +50,18 @@ describe('generic RAG recovery and grounding path', () => {
     expect(result.answer).toContain('Customer Care');
   });
 
+  it('retries a generic model fallback with an explicit evidence correction', async () => {
+    const relevant = chunk('care', 'Call 020 3011 1002 or use the Gousto Help Centre.', 0.82);
+    let calls = 0;
+    const { service, llm } = fixture({
+      search: async () => [relevant],
+      answer: async (input) => (++calls === 1 ? 'I don’t have verified information about that.' : input.context[0]!.text),
+    });
+    const result = await service.chat('tenant-a', 'How can I contact Customer Care?');
+    expect(llm.answer).toHaveBeenCalledTimes(2);
+    expect(result.answer).toContain('020 3011 1002');
+  });
+
   it('uses bounded conversation history for summaries without knowledge retrieval', async () => {
     const { service, repo, embedding, vector, llm } = fixture({ answer: async (input) => input.history.map((x: any) => x.content).join(' | ') });
     repo.messages.mockResolvedValue([{ role: 'user', content: 'We discussed delivery.' }, { role: 'assistant', content: 'Delivery takes two days.' }]);
