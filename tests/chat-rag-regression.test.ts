@@ -62,6 +62,17 @@ describe('generic RAG recovery and grounding path', () => {
     expect(result.answer).toContain('020 3011 1002');
   });
 
+  it('keeps standalone factual retrieval independent of prior chat answers', async () => {
+    const relevant = chunk('sizes', 'Gousto box sizes are designed for 1 to 5 people.', 0.82);
+    const { service, repo, embedding } = fixture({ search: async () => [relevant] });
+    repo.messages.mockResolvedValue([
+      { role: 'user', content: 'How does Gousto work?' },
+      { role: 'assistant', content: 'Gousto delivers recipe boxes.' },
+    ]);
+    await service.chat('tenant-a', 'What recipe box sizes do you offer?', 'existing-session');
+    expect(embedding.embed).toHaveBeenCalledWith(['What recipe box sizes do you offer?']);
+  });
+
   it('uses bounded conversation history for summaries without knowledge retrieval', async () => {
     const { service, repo, embedding, vector, llm } = fixture({ answer: async (input) => input.history.map((x: any) => x.content).join(' | ') });
     repo.messages.mockResolvedValue([{ role: 'user', content: 'We discussed delivery.' }, { role: 'assistant', content: 'Delivery takes two days.' }]);
