@@ -36,7 +36,12 @@ export class ChatService {
 
   private retrievalQuery(message: string, history: ChatMessage[]) {
     const lower = message.toLowerCase();
-    const needsContext = message.trim().split(/\s+/).length <= 8 || /\b(it|that|this|they|them|there|those|what|how much|summarize)\b/i.test(lower);
+    // Standalone factual questions must be embedded on their own. Short
+    // questions are common in chat, but length alone does not make a request a
+    // follow-up; mixing unrelated prior answers into the vector query can push
+    // the tenant's relevant chunk out of the semantic result. Only include
+    // history when the wording explicitly depends on earlier conversation.
+    const needsContext = /\b(?:it|that|this|they|them|there|those|he|she|previous|above|earlier|same|again|just)\b|\bwhat about\b|\bwhat did you\b/i.test(lower);
     if (!needsContext || !history.length) return message;
     return [...history.slice(-6).map((x) => `${x.role}: ${x.content}`), `user: ${message}`].join('\n');
   }
