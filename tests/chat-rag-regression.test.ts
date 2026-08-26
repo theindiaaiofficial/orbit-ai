@@ -36,6 +36,15 @@ describe('generic RAG recovery and grounding path', () => {
     expect(selected[0].id).toBe('answer');
   });
 
+  it('promotes a clearly lexical tenant answer when semantic scores are near-tied', async () => {
+    const { service } = fixture();
+    const selected = (service as any).selectEvidence([
+      chunk('generic', 'Gousto is a flexible recipe box company.', 0.264),
+      chunk('sizes', 'Box sizes are designed for 1 to 5 people; customers can choose 2 to 5 recipes.', 0.213),
+    ], 'What recipe box sizes do you offer?');
+    expect(selected[0].id).toBe('sizes');
+  });
+
   it('recovers after a weak first hit and merges recovered tenant evidence', async () => {
     const relevant = chunk('care', 'For assistance, customers can contact the Customer Care team by email.', 0.79);
     let searchCount = 0;

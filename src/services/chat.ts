@@ -53,7 +53,7 @@ export class ChatService {
       // Semantic similarity is the primary signal. Lexical overlap is only a
       // deterministic tie-breaker for near-equal vectors; otherwise generic
       // words such as “contact” must not displace the relevant chunk.
-      .sort((a, b) => (Math.abs(b.x.score - a.x.score) > 0.05 ? b.x.score - a.x.score : (b.lexical - a.lexical) || (b.x.score - a.x.score)))
+      .sort((a, b) => (Math.abs(b.x.score - a.x.score) > 0.08 ? b.x.score - a.x.score : (b.lexical - a.lexical) || (b.x.score - a.x.score)))
       .slice(0, MAX_EVIDENCE)
       .map((x) => x.x);
   }
