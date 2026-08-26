@@ -1,6 +1,7 @@
 import type { ChatMessage, ClientConfig, ProviderHealth, RetrievedChunk } from '../domain/types.js';
 import type { LlmConfig } from '../config/llm.js';
-export interface LlmInput { question: string; prompt: string; context: RetrievedChunk[]; config: ClientConfig; history?: ChatMessage[] }
+export type ChatDebug = (stage: string, data: Record<string, unknown>) => void;
+export interface LlmInput { question: string; prompt: string; context: RetrievedChunk[]; config: ClientConfig; history?: ChatMessage[]; debug?: ChatDebug }
 export interface LlmProvider {
   readonly name: string;
   answer(input: LlmInput): Promise<string>;
@@ -93,6 +94,7 @@ export class OpenAICompatibleLlm implements LlmProvider {
       { role: 'system', content: `TENANT KNOWLEDGE (authoritative, tenant-scoped)\n${context || '(none)'}` },
       { role: 'user', content: `USER\nQuestion: ${i.question}` },
     ];
+    i.debug?.('LLM_REQUEST', { provider: this.config.providerName, model: this.config.model, stream, messages: messages.map((m) => ({ role: m.role, chars: m.content.length, preview: m.content.slice(0, 800) })) });
     return { model: this.config.model, temperature: this.config.sampling.temperature,
       ...(this.config.sampling.topP === undefined ? {} : { top_p: this.config.sampling.topP }),
       ...(this.config.sampling.maxTokens === undefined ? {} : { max_tokens: this.config.sampling.maxTokens }), stream, messages };
@@ -103,7 +105,9 @@ export class OpenAICompatibleLlm implements LlmProvider {
     const r = await this.request(this.url(this.config.chatPath), { method: 'POST', headers: this.headers(), body: JSON.stringify(this.payload(i, false)) }, this.config.maxRetries);
     if (!r.ok) throw new Error(`LLM provider failed (${r.status})`);
     const j = await r.json() as { choices?: { message?: { content?: string } }[] };
-    return j.choices?.[0]?.message?.content ?? i.config.fallbackMessage;
+    const answer = j.choices?.[0]?.message?.content ?? i.config.fallbackMessage;
+    i.debug?.('RAW_LLM_RESPONSE', { stream: false, chars: answer.length, text: answer });
+    return answer;
   }
   async streamAnswer(i: LlmInput, onToken: (token: string) => void) {
     const identity = tenantIdentityAnswer(i.question, i.config);
@@ -117,6 +121,7 @@ export class OpenAICompatibleLlm implements LlmProvider {
       try { const token = (JSON.parse(line.slice(6)) as { choices?: { delta?: { content?: string } }[] }).choices?.[0]?.delta?.content ?? ''; if (token) { answer += token; onToken(token); } } catch { /* ignore incomplete provider frames */ }
     };
     while (true) { const { value, done } = await reader.read(); buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }); const lines = buffer.split('\n'); buffer = lines.pop() ?? ''; lines.forEach(emit); if (done) break; }
+    i.debug?.('RAW_LLM_RESPONSE', { stream: true, chars: answer.length, text: answer });
     if (!answer) {
       // Some OpenAI-compatible gateways advertise streaming but emit no parseable
       // delta frames. Recover through the same provider's bounded non-streaming

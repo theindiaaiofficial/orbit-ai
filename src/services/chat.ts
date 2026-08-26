@@ -2,7 +2,7 @@ import crypto from 'node:crypto';
 import type { Repository } from '../repositories/repository.js';
 import type { EmbeddingProvider } from '../providers/embedding.js';
 import type { VectorProvider } from '../providers/vector.js';
-import type { LlmProvider, LlmInput } from '../providers/llm.js';
+import type { LlmProvider, LlmInput, ChatDebug } from '../providers/llm.js';
 import type { Client, ChatMessage, RetrievedChunk } from '../domain/types.js';
 import { AppError } from '../lib/errors.js';
 import { groundingCorrection, validateGrounding } from './grounding.js';
@@ -10,7 +10,15 @@ import { groundingCorrection, validateGrounding } from './grounding.js';
 const MAX_CANDIDATES = 40;
 const MAX_EVIDENCE = 12;
 
-type Prepared = { client: Client; sid: string; conversationId: string; history: ChatMessage[]; evidence: RetrievedChunk[]; candidates: RetrievedChunk[]; started: number; question: string; fallbackReason?: string };
+const DEBUG_QUESTION = 'How much does a PureGym day pass cost, and how long is it valid?';
+const safePreview = (value: string, limit = 800) => value
+  .replace(/(?:sk|pk|api[_ -]?key|bearer)[=: ]+[A-Za-z0-9._-]+/gi, '[REDACTED_SECRET]')
+  .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]')
+  .replace(/(?:\+?\d[\d ()-]{7,}\d)/g, '[REDACTED_PHONE]')
+  .slice(0, limit);
+
+
+type Prepared = { debug?: ChatDebug; client: Client; sid: string; conversationId: string; history: ChatMessage[]; evidence: RetrievedChunk[]; candidates: RetrievedChunk[]; started: number; question: string; fallbackReason?: string };
 
 function professionalFallback(client: Client) {
   const company = client.config.companyName?.trim() || client.name;
@@ -76,12 +84,18 @@ export class ChatService {
     if (!client?.enabled) throw new AppError(403, 'TENANT_DISABLED', 'Tenant is disabled');
     const started = Date.now();
     const sid = sessionId ?? crypto.randomUUID();
+    const debug: ChatDebug | undefined = process.env.ORBIT_TEMP_DEBUG_PUREGYM === '1' && message === DEBUG_QUESTION && process.env.ORBIT_TEMP_DEBUG_CLIENT_ID === clientId
+      ? (stage, data) => console.info(JSON.stringify({ event: 'chat.temp-debug', traceId: sid, stage, ...data }))
+      : undefined;
+    debug?.('USER_INPUT', { question: message });
+    debug?.('TENANT', { clientId: client.id, clientName: client.name, tenantIsolation: 'repository/vector calls use resolved clientId' });
     const conversationId = await this.repo.createConversation(clientId, sid);
     const prior = (await this.repo.messages(conversationId)).slice(-12);
     await this.repo.addMessage(conversationId, 'user', message);
     const history = prior.slice(-12);
     const summaryRequest = this.isSummaryRequest(message);
     const query = this.retrievalQuery(message, history);
+    debug?.('RETRIEVAL_QUERY', { query: safePreview(query, 2400), historyAdded: query !== message, historyMessageCount: history.length, boundedHistoryCount: Math.min(history.length, 6) });
     const k = Math.min(client.config.topK ?? MAX_CANDIDATES, MAX_CANDIDATES);
     const threshold = client.config.minSimilarity ?? 0.05;
     let candidates: RetrievedChunk[] = [];
@@ -92,6 +106,7 @@ export class ChatService {
     if (knowledgeQuestion) {
       [q] = await this.embedding.embed([query]);
       candidates = await this.vector.search(clientId, q!, k, threshold);
+      debug?.('RETRIEVAL_RESULTS', { phase: 'initial', candidateCount: candidates.length, results: candidates.slice(0, MAX_CANDIDATES).map((x) => ({ chunkId: x.id, score: Number(x.score.toFixed(4)), excerpt: safePreview(x.text, 360) })) });
       console.info(JSON.stringify({ event: 'retrieval.initial', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), embeddingDimension: q?.length ?? 0, topK: k, minSimilarity: client.config.minSimilarity ?? 0.05, candidateCount: candidates.length, scores: candidates.slice(0, 12).map((x) => Number(x.score.toFixed(4))), chunkIds: candidates.slice(0, 12).map((x) => x.id) }));
       if (!candidates.length && query !== message) {
         const [messageQ] = await this.embedding.embed([message]);
@@ -122,25 +137,36 @@ export class ChatService {
       }
     }
     const evidence = this.selectEvidence(candidates, evidenceQuery);
+    debug?.('RETRIEVAL_RESULTS', { phase: 'final', candidateCount: candidates.length, results: candidates.slice(0, MAX_CANDIDATES).map((x) => ({ chunkId: x.id, score: Number(x.score.toFixed(4)), excerpt: safePreview(x.text, 360) })) });
+    debug?.('SELECTED_EVIDENCE', { selected: evidence.map((x) => ({ chunkId: x.id, score: Number(x.score.toFixed(4)), excerpt: safePreview(x.text, 500) })), dayPassInformationPresent: evidence.some((x) => /day pass|1\s*(?:to|-|–)\s*30|30 days/i.test(x.text)) });
     console.info(JSON.stringify({ event: 'retrieval.final', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), reformulatedQueries: reformulatedQueries.map((x) => x.slice(0, 240)), candidateCount: candidates.length, evidenceCount: evidence.length, evidenceIds: evidence.map((x) => x.id), evidenceScores: evidence.map((x) => Number(x.score.toFixed(4))), fallback: knowledgeQuestion && !evidence.length ? 'no-verified-evidence-after-bounded-reformulation' : 'none' }));
-    return { client, sid, conversationId, history, candidates, evidence, started, question: message, fallbackReason: knowledgeQuestion && !evidence.length ? 'no-verified-evidence-after-bounded-reformulation' : undefined };
+    return { debug, client, sid, conversationId, history, candidates, evidence, started, question: message, fallbackReason: knowledgeQuestion && !evidence.length ? 'no-verified-evidence-after-bounded-reformulation' : undefined };
   }
 
   private input(p: Prepared, prompt = p.client.prompt): LlmInput {
-    return { question: p.question, prompt, context: p.evidence, config: p.client.config, history: p.history };
+    return { question: p.question, prompt, context: p.evidence, config: p.client.config, history: p.history, debug: p.debug };
   }
 
   private async groundedAnswer(p: Prepared) {
     const knowledgeQuestion = !this.isSummaryRequest(p.question) && this.isKnowledgeQuestion(p.question);
-    if (knowledgeQuestion && !p.evidence.length) return professionalFallback(p.client);
+    if (knowledgeQuestion && !p.evidence.length) {
+      p.debug?.('FALLBACK', { called: true, reason: p.fallbackReason ?? 'no-evidence' });
+      return professionalFallback(p.client);
+    }
     let answer = await this.llm.answer(this.input(p));
     if (!knowledgeQuestion) return isGenericFallback(answer) ? professionalFallback(p.client) : answer;
     let check = validateGrounding(p.question, answer, p.evidence);
+    p.debug?.('VALIDATION', { attempt: 1, grounded: check.ok && !isGenericFallback(answer), reasons: check.reasons, answer: safePreview(answer) });
     if (!check.ok || isGenericFallback(answer)) {
       const reasons = check.reasons.length ? check.reasons : ['generic fallback despite tenant evidence'];
+      p.debug?.('CORRECTION', { triggered: true, reason: reasons });
       answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(reasons)}`));
       check = validateGrounding(p.question, answer, p.evidence);
-      if (!check.ok || isGenericFallback(answer)) return professionalFallback(p.client);
+      p.debug?.('VALIDATION', { attempt: 2, grounded: check.ok && !isGenericFallback(answer), reasons: check.reasons, answer: safePreview(answer) });
+      if (!check.ok || isGenericFallback(answer)) {
+        p.debug?.('FALLBACK', { called: true, reason: check.reasons.length ? check.reasons : ['generic fallback after correction'] });
+        return professionalFallback(p.client);
+      }
     }
     return answer;
   }
@@ -162,21 +188,28 @@ export class ChatService {
     let answer: string;
     const buffered: string[] = [];
     const knowledgeQuestion = !this.isSummaryRequest(message) && this.isKnowledgeQuestion(message);
-    if (knowledgeQuestion && !p.evidence.length) answer = professionalFallback(p.client);
+    if (knowledgeQuestion && !p.evidence.length) {
+      p.debug?.('FALLBACK', { called: true, reason: p.fallbackReason ?? 'no-evidence' });
+      answer = professionalFallback(p.client);
+    }
     else {
       answer = await this.llm.streamAnswer(this.input(p), (token) => buffered.push(token));
       if (!knowledgeQuestion && isGenericFallback(answer)) answer = professionalFallback(p.client);
       if (knowledgeQuestion) {
         let check = validateGrounding(message, answer, p.evidence);
+        p.debug?.('VALIDATION', { attempt: 1, grounded: check.ok && !isGenericFallback(answer), reasons: check.reasons, answer: safePreview(answer) });
         if (!check.ok || isGenericFallback(answer)) {
+          p.debug?.('CORRECTION', { triggered: true, reason: check.reasons.length ? check.reasons : ['generic fallback despite tenant evidence'] });
           answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons.length ? check.reasons : ['generic fallback despite tenant evidence'])}`));
           check = validateGrounding(message, answer, p.evidence);
-          if (!check.ok || isGenericFallback(answer)) answer = professionalFallback(p.client);
+          p.debug?.('VALIDATION', { attempt: 2, grounded: check.ok && !isGenericFallback(answer), reasons: check.reasons, answer: safePreview(answer) });
+          if (!check.ok || isGenericFallback(answer)) { p.debug?.('FALLBACK', { called: true, reason: check.reasons.length ? check.reasons : ['generic fallback after correction'] }); answer = professionalFallback(p.client); }
         }
       }
     }
     // Emit only the accepted answer. This preserves real provider streaming semantics
     // without showing a claim that the final grounding check rejects.
+    p.debug?.('FINAL_STREAM', { text: safePreview(answer, 2400), chars: answer.length });
     for (const token of answer.match(/\S+\s*/g) ?? []) onToken(token);
     await this.repo.addMessage(p.conversationId, 'assistant', answer);
     await this.repo.usage(clientId, 'chat', message.length + answer.length, Date.now() - p.started);
