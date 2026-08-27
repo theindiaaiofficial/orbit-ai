@@ -81,6 +81,33 @@ describe('generic RAG recovery and grounding path', () => {
     expect(result.answer).toContain('Gousto ingredients stay fresh');
   });
 
+  it('retrieves evidence through the live chat path for the Airtasker posting question', async () => {
+    const relevant = chunk('posting', 'To post a task, describe what you need, add a budget, and publish it for Taskers to see.', 0.82);
+    const { service, embedding, vector } = fixture({ search: async () => [relevant] });
+    const result = await service.chat('tenant-a', 'How do I post a task on Airtasker?');
+    expect(embedding.embed).toHaveBeenCalledWith(['How do I post a task on Airtasker?']);
+    expect(vector.search).toHaveBeenCalledOnce();
+    expect(result.sources[0]?.chunkId).toBe('posting');
+    expect(result.answer).toContain('post a task');
+  });
+
+  it('retrieves evidence for a normal known knowledge question', async () => {
+    const relevant = chunk('refunds', 'Refund requests are reviewed under the published refund policy.', 0.82);
+    const { service, vector } = fixture({ search: async () => [relevant] });
+    const result = await service.chat('tenant-a', 'What is your refund policy?');
+    expect(vector.search).toHaveBeenCalledOnce();
+    expect(result.sources[0]?.chunkId).toBe('refunds');
+    expect(result.answer).toContain('refund policy');
+  });
+
+  it('keeps a genuinely unknown question on the configured fallback', async () => {
+    const { service, llm, vector } = fixture({ answer: async () => 'UNKNOWN' });
+    const result = await service.chat('tenant-a', 'What is the meaning of life?');
+    expect(vector.search).not.toHaveBeenCalled();
+    expect(llm.answer).toHaveBeenCalledOnce();
+    expect(result.answer).toBe('UNKNOWN');
+  });
+
   it('keeps standalone factual retrieval independent of prior chat answers', async () => {
     const relevant = chunk('sizes', 'Gousto box sizes are designed for 1 to 5 people.', 0.82);
     const { service, repo, embedding } = fixture({ search: async () => [relevant] });
