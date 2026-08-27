@@ -71,6 +71,16 @@ describe('generic RAG recovery and grounding path', () => {
     expect(result.answer).toContain('020 3011 1002');
   });
 
+  it('retrieves evidence through the live chat path for the Gousto freshness question', async () => {
+    const relevant = chunk('freshness', 'Gousto ingredients stay fresh for the period shown on the use-by label.', 0.82);
+    const { service, embedding, vector } = fixture({ search: async () => [relevant] });
+    const result = await service.chat('tenant-a', 'how long do gousto ingredients stay fresh?');
+    expect(embedding.embed).toHaveBeenCalledWith(['how long do gousto ingredients stay fresh?']);
+    expect(vector.search).toHaveBeenCalledOnce();
+    expect(result.sources[0]?.chunkId).toBe('freshness');
+    expect(result.answer).toContain('Gousto ingredients stay fresh');
+  });
+
   it('keeps standalone factual retrieval independent of prior chat answers', async () => {
     const relevant = chunk('sizes', 'Gousto box sizes are designed for 1 to 5 people.', 0.82);
     const { service, repo, embedding } = fixture({ search: async () => [relevant] });

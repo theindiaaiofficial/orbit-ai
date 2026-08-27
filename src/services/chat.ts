@@ -40,7 +40,7 @@ export class ChatService {
   private isKnowledgeQuestion(message: string) {
     const text = message.trim().toLowerCase();
     if (/^(hi|hello|hey|thanks|thank you|okay|ok|good morning|good afternoon|good evening|who are you|can you help me)[!.? ]*$/i.test(text)) return false;
-    return /\b(price|pricing|cost|service|services|offer|provide|policy|policies|hours|open|close|warranty|refund|return|book|booking|schedule|contact|phone|email|address|location|available|availability|emergency|company|product|plan|support|delivery|shipping|membership|rate|fee|how much|where|when|what do you|does .* have|can .* bring|minimum age)\b/i.test(text);
+    return /\b(price|pricing|cost|service|services|offer|provide|policy|policies|hours|open|close|warranty|refund|return|book|booking|schedule|contact|phone|email|address|location|available|availability|emergency|company|product|plan|support|delivery|shipping|membership|rate|fee|how much|how long|where|when|what do you|does .* have|can .* bring|minimum age)\b/i.test(text);
   }
 
   private retrievalQuery(message: string, history: ChatMessage[]) {
