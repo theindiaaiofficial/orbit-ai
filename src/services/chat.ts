@@ -84,15 +84,18 @@ export class ChatService {
     if (!client?.enabled) throw new AppError(403, 'TENANT_DISABLED', 'Tenant is disabled');
     const started = Date.now();
     const sid = sessionId ?? crypto.randomUUID();
-    const debug: ChatDebug | undefined = process.env.ORBIT_TEMP_DEBUG_PUREGYM === '1' && message === DEBUG_QUESTION && process.env.ORBIT_TEMP_DEBUG_CLIENT_ID === clientId
+    const debugEnabled = process.env.ORBIT_TEMP_DEBUG_LLM_INPUT === '1'
+      || (process.env.ORBIT_TEMP_DEBUG_PUREGYM === '1' && message === DEBUG_QUESTION && process.env.ORBIT_TEMP_DEBUG_CLIENT_ID === clientId);
+    const debug: ChatDebug | undefined = debugEnabled
       ? (stage, data) => console.info(JSON.stringify({ event: 'chat.temp-debug', traceId: sid, stage, ...data }))
       : undefined;
-    debug?.('USER_INPUT', { question: message });
+    debug?.('USER_INPUT', { question: safePreview(message, 2400) });
     debug?.('TENANT', { clientId: client.id, clientName: client.name, tenantIsolation: 'repository/vector calls use resolved clientId' });
     const conversationId = await this.repo.createConversation(clientId, sid);
     const prior = (await this.repo.messages(conversationId)).slice(-12);
     await this.repo.addMessage(conversationId, 'user', message);
     const history = prior.slice(-12);
+    debug?.('HISTORY_STATUS', { loaded: true, sentToLlm: false, historyCount: 0, historyChars: 0, historyTokensApprox: 0, loadedMessageCount: history.length, loadedChars: history.reduce((total, item) => total + item.content.length, 0) });
     const summaryRequest = this.isSummaryRequest(message);
     const query = this.retrievalQuery(message, history);
     debug?.('RETRIEVAL_QUERY', { query: safePreview(query, 2400), historyAdded: query !== message, historyMessageCount: history.length, boundedHistoryCount: Math.min(history.length, 6) });
@@ -137,6 +140,8 @@ export class ChatService {
       }
     }
     const evidence = this.selectEvidence(candidates, evidenceQuery);
+    debug?.('RAG_RETRIEVAL', { retrievedChunkCount: candidates.length });
+    debug?.('RAG_CHUNKS', { selected: evidence.map((x) => ({ id: x.id, score: Number(x.score.toFixed(4)), source: safePreview(x.source, 240), preview: safePreview(x.text, 500) })) });
     debug?.('RETRIEVAL_RESULTS', { phase: 'final', candidateCount: candidates.length, results: candidates.slice(0, MAX_CANDIDATES).map((x) => ({ chunkId: x.id, score: Number(x.score.toFixed(4)), excerpt: safePreview(x.text, 360) })) });
     debug?.('SELECTED_EVIDENCE', { selected: evidence.map((x) => ({ chunkId: x.id, score: Number(x.score.toFixed(4)), excerpt: safePreview(x.text, 500) })), dayPassInformationPresent: evidence.some((x) => /day pass|1\s*(?:to|-|–)\s*30|30 days/i.test(x.text)) });
     console.info(JSON.stringify({ event: 'retrieval.final', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), reformulatedQueries: reformulatedQueries.map((x) => x.slice(0, 240)), candidateCount: candidates.length, evidenceCount: evidence.length, evidenceIds: evidence.map((x) => x.id), evidenceScores: evidence.map((x) => Number(x.score.toFixed(4))), fallback: knowledgeQuestion && !evidence.length ? 'no-verified-evidence-after-bounded-reformulation' : 'none' }));
@@ -180,6 +185,7 @@ export class ChatService {
     const answer = await this.groundedAnswer(p);
     await this.repo.addMessage(p.conversationId, 'assistant', answer);
     await this.repo.usage(clientId, 'chat', message.length + answer.length, Date.now() - p.started);
+    p.debug?.('FINAL_RESPONSE', { chars: answer.length, preview: safePreview(answer, 2400) });
     return this.result(p, answer);
   }
 
@@ -213,6 +219,7 @@ export class ChatService {
     for (const token of answer.match(/\S+\s*/g) ?? []) onToken(token);
     await this.repo.addMessage(p.conversationId, 'assistant', answer);
     await this.repo.usage(clientId, 'chat', message.length + answer.length, Date.now() - p.started);
+    p.debug?.('FINAL_RESPONSE', { chars: answer.length, preview: safePreview(answer, 2400) });
     return this.result(p, answer);
   }
 }

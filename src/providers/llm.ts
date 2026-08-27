@@ -13,6 +13,12 @@ export interface LlmProvider {
 type Fetch = typeof fetch;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const retryable = (status: number) => [408, 409, 425, 429].includes(status) || status >= 500;
+const approxTokens = (value: string) => Math.ceil(value.length / 4);
+const debugPreview = (value: string, limit = 800) => value
+  .replace(/(?:sk|pk|api[_ -]?key|bearer)[=: ]+[A-Za-z0-9._-]+/gi, '[REDACTED_SECRET]')
+  .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]')
+  .replace(/(?:\\+?\\d[\\d ()-]{7,}\\d)/g, '[REDACTED_PHONE]')
+  .slice(0, limit);
 
 /** Customer-facing identity is tenant configuration, never the model/provider. */
 export function tenantIdentityPolicy(config: ClientConfig) {
@@ -93,7 +99,11 @@ export class OpenAICompatibleLlm implements LlmProvider {
       { role: 'system', content: `TENANT KNOWLEDGE (authoritative, tenant-scoped)\n${context || '(none)'}` },
       { role: 'user', content: `USER\nQuestion: ${i.question}` },
     ];
-    i.debug?.('LLM_REQUEST', { provider: this.config.providerName, model: this.config.model, stream, messages: messages.map((m) => ({ role: m.role, chars: m.content.length, preview: m.content.slice(0, 800) })) });
+    const contextText = context || '(none)';
+    const payloadChars = messages.reduce((total, message) => total + message.content.length, 0);
+    i.debug?.('LLM_CONTEXT', { chars: contextText.length, tokensApprox: approxTokens(contextText), preview: debugPreview(contextText, 2400) });
+    i.debug?.('LLM_MESSAGES', { historyIncluded: false, messages: messages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content), preview: debugPreview(m.content, 800) })) });
+    i.debug?.('LLM_REQUEST', { provider: this.config.providerName, model: this.config.model, stream, payloadChars, payloadTokensApprox: approxTokens(JSON.stringify(messages)), messages: messages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content) })) });
     return { model: this.config.model, temperature: this.config.sampling.temperature,
       ...(this.config.sampling.topP === undefined ? {} : { top_p: this.config.sampling.topP }),
       ...(this.config.sampling.maxTokens === undefined ? {} : { max_tokens: this.config.sampling.maxTokens }), stream, messages };
@@ -105,7 +115,7 @@ export class OpenAICompatibleLlm implements LlmProvider {
     if (!r.ok) throw new Error(`LLM provider failed (${r.status})`);
     const j = await r.json() as { choices?: { message?: { content?: string } }[] };
     const answer = j.choices?.[0]?.message?.content ?? i.config.fallbackMessage;
-    i.debug?.('RAW_LLM_RESPONSE', { stream: false, chars: answer.length, text: answer });
+    i.debug?.('RAW_LLM_RESPONSE', { stream: false, chars: answer.length, tokensApprox: approxTokens(answer), preview: debugPreview(answer, 2400) });
     return answer;
   }
   async streamAnswer(i: LlmInput, onToken: (token: string) => void) {
@@ -120,7 +130,7 @@ export class OpenAICompatibleLlm implements LlmProvider {
       try { const token = (JSON.parse(line.slice(6)) as { choices?: { delta?: { content?: string } }[] }).choices?.[0]?.delta?.content ?? ''; if (token) { answer += token; onToken(token); } } catch { /* ignore incomplete provider frames */ }
     };
     while (true) { const { value, done } = await reader.read(); buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }); const lines = buffer.split('\n'); buffer = lines.pop() ?? ''; lines.forEach(emit); if (done) break; }
-    i.debug?.('RAW_LLM_RESPONSE', { stream: true, chars: answer.length, text: answer });
+    i.debug?.('RAW_LLM_RESPONSE', { stream: true, chars: answer.length, tokensApprox: approxTokens(answer), preview: debugPreview(answer, 2400) });
     if (!answer) {
       // Some OpenAI-compatible gateways advertise streaming but emit no parseable
       // delta frames. Recover through the same provider's bounded non-streaming
@@ -141,10 +151,16 @@ export class OpenAICompatibleLlm implements LlmProvider {
         { role: 'user', content: `Conversation:\n${history || '(none)'}\nCurrent request: ${i.question}` },
       ],
     };
+    const reformulationMessages = payload.messages;
+    const reformulationChars = reformulationMessages.reduce((total, message) => total + message.content.length, 0);
+    i.debug?.('LLM_CONTEXT', { chars: 0, tokensApprox: 0, preview: '(reformulation request has no tenant context)' });
+    i.debug?.('LLM_MESSAGES', { historyIncluded: history.length > 0, messages: reformulationMessages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content), preview: debugPreview(m.content, 800) })) });
+    i.debug?.('LLM_REQUEST', { provider: this.config.providerName, model: this.config.model, stream: false, payloadChars: reformulationChars, payloadTokensApprox: approxTokens(JSON.stringify(reformulationMessages)), messages: reformulationMessages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content) })) });
     const r = await this.request(this.url(this.config.chatPath), { method: 'POST', headers: this.headers(), body: JSON.stringify(payload) }, 0);
     if (!r.ok) return null;
     const j = await r.json() as { choices?: { message?: { content?: string } }[] };
     const query = j.choices?.[0]?.message?.content?.trim().replace(/^['\"]|['\"]$/g, '');
+    i.debug?.('RAW_LLM_RESPONSE', { stream: false, chars: query?.length ?? 0, tokensApprox: approxTokens(query ?? ''), preview: debugPreview(query ?? '', 2400) });
     return query && query.toUpperCase() !== 'NONE' ? query : null;
   }
   async health(): Promise<ProviderHealth> {
