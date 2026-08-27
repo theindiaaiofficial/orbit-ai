@@ -11,6 +11,7 @@ const MAX_CANDIDATES = 40;
 const MAX_EVIDENCE = 12;
 
 const DEBUG_QUESTION = 'How much does a PureGym day pass cost, and how long is it valid?';
+const DEBUG_GOUSTO_QUESTION = 'how long do gousto ingredients stay fresh?';
 const safePreview = (value: string, limit = 800) => value
   .replace(/(?:sk|pk|api[_ -]?key|bearer)[=: ]+[A-Za-z0-9._-]+/gi, '[REDACTED_SECRET]')
   .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]')
@@ -85,11 +86,12 @@ export class ChatService {
     const started = Date.now();
     const sid = sessionId ?? crypto.randomUUID();
     const debugEnabled = process.env.ORBIT_TEMP_DEBUG_LLM_INPUT === '1'
-      || (process.env.ORBIT_TEMP_DEBUG_PUREGYM === '1' && message === DEBUG_QUESTION && process.env.ORBIT_TEMP_DEBUG_CLIENT_ID === clientId);
+      || (process.env.ORBIT_TEMP_DEBUG_PUREGYM === '1' && message === DEBUG_QUESTION && process.env.ORBIT_TEMP_DEBUG_CLIENT_ID === clientId)
+      || (process.env.ORBIT_TEMP_DEBUG_GOUSTO === '1' && message === DEBUG_GOUSTO_QUESTION);
     const debug: ChatDebug | undefined = debugEnabled
       ? (stage, data) => console.info(JSON.stringify({ event: 'chat.temp-debug', traceId: sid, stage, ...data }))
       : undefined;
-    debug?.('USER_INPUT', { question: safePreview(message, 2400) });
+    debug?.('USER_INPUT', { chars: message.length, tokensApprox: Math.ceil(message.length / 4), questionPreview: safePreview(message, 240) });
     debug?.('TENANT', { clientId: client.id, clientName: client.name, tenantIsolation: 'repository/vector calls use resolved clientId' });
     const conversationId = await this.repo.createConversation(clientId, sid);
     const prior = (await this.repo.messages(conversationId)).slice(-12);
@@ -98,7 +100,8 @@ export class ChatService {
     debug?.('HISTORY_STATUS', { loaded: true, sentToLlm: false, historyCount: 0, historyChars: 0, historyTokensApprox: 0, loadedMessageCount: history.length, loadedChars: history.reduce((total, item) => total + item.content.length, 0) });
     const summaryRequest = this.isSummaryRequest(message);
     const query = this.retrievalQuery(message, history);
-    debug?.('RETRIEVAL_QUERY', { query: safePreview(query, 2400), historyAdded: query !== message, historyMessageCount: history.length, boundedHistoryCount: Math.min(history.length, 6) });
+    debug?.('RAG_QUERY', { chars: query.length, tokensApprox: Math.ceil(query.length / 4), historyAdded: query !== message, historyMessageCount: history.length, boundedHistoryCount: Math.min(history.length, 6), queryPreview: safePreview(query, 240) });
+    debug?.('RETRIEVAL_QUERY', { query: safePreview(query, 2400), queryChars: query.length, queryTokensApprox: Math.ceil(query.length / 4), historyAdded: query !== message, historyMessageCount: history.length, boundedHistoryCount: Math.min(history.length, 6) });
     const k = Math.min(client.config.topK ?? MAX_CANDIDATES, MAX_CANDIDATES);
     const threshold = client.config.minSimilarity ?? 0.05;
     let candidates: RetrievedChunk[] = [];
@@ -140,8 +143,9 @@ export class ChatService {
       }
     }
     const evidence = this.selectEvidence(candidates, evidenceQuery);
-    debug?.('RAG_RETRIEVAL', { retrievedChunkCount: candidates.length });
-    debug?.('RAG_CHUNKS', { selected: evidence.map((x) => ({ id: x.id, score: Number(x.score.toFixed(4)), source: safePreview(x.source, 240), preview: safePreview(x.text, 500) })) });
+    debug?.('RAG_RETRIEVAL', { retrievedChunkCount: candidates.length, chunks: candidates.map((x) => ({ id: x.id, source: safePreview(x.source, 240), score: Number(x.score.toFixed(4)), chars: x.text.length, tokensApprox: Math.ceil(x.text.length / 4) })) });
+    debug?.('RAG_CHUNKS', { selected: evidence.map((x) => ({ id: x.id, score: Number(x.score.toFixed(4)), source: safePreview(x.source, 240), chars: x.text.length, tokensApprox: Math.ceil(x.text.length / 4), preview: safePreview(x.text, 500) })) });
+    debug?.('SELECTED_CHUNKS', { count: evidence.length, chars: evidence.reduce((total, x) => total + x.text.length, 0), tokensApprox: Math.ceil(evidence.reduce((total, x) => total + x.text.length, 0) / 4), ids: evidence.map((x) => x.id) });
     debug?.('RETRIEVAL_RESULTS', { phase: 'final', candidateCount: candidates.length, results: candidates.slice(0, MAX_CANDIDATES).map((x) => ({ chunkId: x.id, score: Number(x.score.toFixed(4)), excerpt: safePreview(x.text, 360) })) });
     debug?.('SELECTED_EVIDENCE', { selected: evidence.map((x) => ({ chunkId: x.id, score: Number(x.score.toFixed(4)), excerpt: safePreview(x.text, 500) })), dayPassInformationPresent: evidence.some((x) => /day pass|1\s*(?:to|-|–)\s*30|30 days/i.test(x.text)) });
     console.info(JSON.stringify({ event: 'retrieval.final', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), reformulatedQueries: reformulatedQueries.map((x) => x.slice(0, 240)), candidateCount: candidates.length, evidenceCount: evidence.length, evidenceIds: evidence.map((x) => x.id), evidenceScores: evidence.map((x) => Number(x.score.toFixed(4))), fallback: knowledgeQuestion && !evidence.length ? 'no-verified-evidence-after-bounded-reformulation' : 'none' }));

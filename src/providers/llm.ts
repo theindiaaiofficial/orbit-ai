@@ -101,9 +101,12 @@ export class OpenAICompatibleLlm implements LlmProvider {
     ];
     const contextText = context || '(none)';
     const payloadChars = messages.reduce((total, message) => total + message.content.length, 0);
-    i.debug?.('LLM_CONTEXT', { chars: contextText.length, tokensApprox: approxTokens(contextText), preview: debugPreview(contextText, 2400) });
+    i.debug?.('FINAL_CONTEXT', { chars: contextText.length, tokensApprox: approxTokens(contextText), selectedChunkCount: i.context.length, preview: debugPreview(contextText, 2400) });
+    i.debug?.('LLM_CONTEXT', { chars: contextText.length, tokensApprox: approxTokens(contextText), selectedChunkCount: i.context.length, preview: debugPreview(contextText, 2400) });
     i.debug?.('LLM_MESSAGES', { historyIncluded: false, messages: messages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content), preview: debugPreview(m.content, 800) })) });
-    i.debug?.('LLM_REQUEST', { provider: this.config.providerName, model: this.config.model, stream, payloadChars, payloadTokensApprox: approxTokens(JSON.stringify(messages)), messages: messages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content) })) });
+    const serializedPayloadChars = JSON.stringify({ model: this.config.model, stream, messages }).length;
+    i.debug?.('LLM_REQUEST_SIZE', { provider: this.config.providerName, model: this.config.model, stream, messageCount: messages.length, inputChars: payloadChars, inputTokensApprox: approxTokens(JSON.stringify(messages)), serializedPayloadChars, serializedPayloadTokensApprox: approxTokens(JSON.stringify({ model: this.config.model, stream, messages })) });
+    i.debug?.('LLM_REQUEST', { provider: this.config.providerName, model: this.config.model, stream, payloadChars, payloadTokensApprox: approxTokens(JSON.stringify(messages)), serializedPayloadChars, messages: messages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content) })) });
     return { model: this.config.model, temperature: this.config.sampling.temperature,
       ...(this.config.sampling.topP === undefined ? {} : { top_p: this.config.sampling.topP }),
       ...(this.config.sampling.maxTokens === undefined ? {} : { max_tokens: this.config.sampling.maxTokens }), stream, messages };
@@ -115,6 +118,7 @@ export class OpenAICompatibleLlm implements LlmProvider {
     if (!r.ok) throw new Error(`LLM provider failed (${r.status})`);
     const j = await r.json() as { choices?: { message?: { content?: string } }[] };
     const answer = j.choices?.[0]?.message?.content ?? i.config.fallbackMessage;
+    i.debug?.('LLM_RESPONSE', { stream: false, chars: answer.length, tokensApprox: approxTokens(answer), preview: debugPreview(answer, 2400) });
     i.debug?.('RAW_LLM_RESPONSE', { stream: false, chars: answer.length, tokensApprox: approxTokens(answer), preview: debugPreview(answer, 2400) });
     return answer;
   }
@@ -130,6 +134,7 @@ export class OpenAICompatibleLlm implements LlmProvider {
       try { const token = (JSON.parse(line.slice(6)) as { choices?: { delta?: { content?: string } }[] }).choices?.[0]?.delta?.content ?? ''; if (token) { answer += token; onToken(token); } } catch { /* ignore incomplete provider frames */ }
     };
     while (true) { const { value, done } = await reader.read(); buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }); const lines = buffer.split('\n'); buffer = lines.pop() ?? ''; lines.forEach(emit); if (done) break; }
+    i.debug?.('LLM_RESPONSE', { stream: true, chars: answer.length, tokensApprox: approxTokens(answer), preview: debugPreview(answer, 2400) });
     i.debug?.('RAW_LLM_RESPONSE', { stream: true, chars: answer.length, tokensApprox: approxTokens(answer), preview: debugPreview(answer, 2400) });
     if (!answer) {
       // Some OpenAI-compatible gateways advertise streaming but emit no parseable
