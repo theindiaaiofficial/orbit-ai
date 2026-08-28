@@ -86,10 +86,13 @@ export class ChatService {
     const terms = [...new Set(question.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])].filter((x) => !stop.has(x));
     if (!terms.length) return null;
     const sentences = evidence.flatMap((chunk) => chunk.text.split(/(?<=[.!?])\s+|\n+/).map((text) => text.trim()).filter(Boolean));
-    const ranked = sentences.map((text) => ({ text, hits: terms.filter((term) => text.toLowerCase().includes(term)).length }))
+    const ranked = sentences.map((text) => {
+      const textWords = new Set(text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
+      return { text, hits: terms.filter((term) => textWords.has(term)).length };
+    })
       .filter((x) => x.hits > 0).sort((a, b) => b.hits - a.hits || a.text.length - b.text.length);
     const distinctive = terms.filter((term) => !['how', 'long', 'much', 'late', 'stay', 'fresh'].includes(term));
-    const supported = ranked.filter((x) => x.hits >= 2 || (distinctive.length > 0 && x.hits >= 1 && distinctive.some((term) => x.text.toLowerCase().includes(term))));
+    const supported = ranked.filter((x) => x.hits >= 2 || (distinctive.length > 0 && x.hits >= 1 && distinctive.some((term) => new Set(x.text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).has(term))));
     if (!supported.length) return null;
     return supported.slice(0, 2).map((x) => x.text).join(' ');
   }
