@@ -94,9 +94,11 @@ export class OpenAICompatibleLlm implements LlmProvider {
   private payload(i: LlmInput, stream: boolean) {
     const context = i.context.map((x, n) => `[${n + 1}] ${x.text}`).join('\n');
     const policy = `${tenantIdentityPolicy(i.config)}\n${i.prompt}\nStrict grounding policy: For tenant-specific factual questions, answer only from TENANT KNOWLEDGE below. TENANT KNOWLEDGE is authoritative and overrides pretrained/model knowledge. The following tenant knowledge is verified evidence for this tenant and must be treated as authoritative. Do not invent or infer missing prices, availability, policies, features, guarantees, fees, locations, dates, or operating details. Preserve qualifications such as “starting from”, gym/location dependence, eligibility, and terms. If evidence explicitly says UNKNOWN or the requested fact is absent, say it is not available; do not use the fallback merely because the question is phrased differently from the evidence in the current tenant knowledge and direct the customer to the official support route when appropriate. Distinguish verified facts from assumptions. Use bounded CONVERSATION history only to resolve follow-ups. For an explicit summary or recap request, summarize that bounded conversation history and do not require tenant knowledge. For greetings and general conversation, respond naturally without requiring tenant knowledge. If the question is tenant-specific and evidence is empty, use this fallback: ${i.config.fallbackMessage}`;
+    const boundedHistory = (i.history ?? []).slice(-8);
     const messages = [
       { role: 'system', content: `SYSTEM POLICY\n${policy}` },
       { role: 'system', content: `TENANT KNOWLEDGE (authoritative, tenant-scoped)\n${context || '(none)'}` },
+      ...boundedHistory.map((m) => ({ role: m.role, content: `CONVERSATION\n${m.content}` })),
       { role: 'user', content: `USER\nQuestion: ${i.question}` },
     ];
     const contextText = context || '(none)';

@@ -43,7 +43,12 @@ function questionEvidenceAligned(question: string, answer: string, evidence: Ret
   if (!terms.length || !evidence.length) return true;
   const answerWords = new Set(answer.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
   const evidenceWords = new Set(evidence.flatMap((chunk) => chunk.text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []));
-  return terms.some((term) => answerWords.has(term) && evidenceWords.has(term));
+  // A concise answer may legitimately omit the question's exact nouns (for
+  // example, “Call 020 3011 1002” answers a Customer Care question). Require
+  // overlap with the selected authoritative evidence as well as either a
+  // question-term hit or a sufficiently direct evidence match.
+  const answerEvidenceOverlap = [...answerWords].filter((word) => evidenceWords.has(word)).length;
+  return terms.some((term) => answerWords.has(term) && evidenceWords.has(term)) || answerEvidenceOverlap >= 2;
 }
 
 /** Tenant-scoped conversation orchestration with bounded recall and conservative grounding. */
@@ -52,8 +57,15 @@ export class ChatService {
 
   private isKnowledgeQuestion(message: string) {
     const text = message.trim().toLowerCase();
+    if (!text) return false;
     if (/^(hi|hello|hey|thanks|thank you|okay|ok|good morning|good afternoon|good evening|who are you|can you help me)[!.? ]*$/i.test(text)) return false;
-    return /\b(price|pricing|cost|service|services|offer|provide|policy|policies|hours|open|close|warranty|refund|return|book|booking|schedule|contact|phone|email|address|location|available|availability|emergency|company|product|plan|support|delivery|shipping|membership|rate|fee|how much|how long|how do i|where|when|what do you|does .* have|can .* bring|minimum age)\b/i.test(text);
+    // Treat ordinary interrogative requests as knowledge intents, rather than
+    // maintaining a brittle list of business nouns. This preserves retrieval
+    // for forms such as “how does…”, “how many…”, “which days…”, and “what if…”.
+    // Clearly general/conversational prompts remain provider-only.
+    if (/\b(?:meaning of life|tell me a joke|write a poem|creative writing|weather today)\b/i.test(text)) return false;
+    return /^(?:who|what|when|where|why|how|which|can|could|do|does|is|are|will|may|should|please)\b/i.test(text)
+      || /\?$/.test(text);
   }
 
   private retrievalQuery(message: string, history: ChatMessage[]) {
