@@ -70,9 +70,9 @@ export class ChatService {
   /** Extract only directly supported sentences when a provider refuses despite evidence. */
   private evidenceBackedAnswer(question: string, evidence: RetrievedChunk[]) {
     const stop = new Set(['the', 'and', 'for', 'how', 'what', 'when', 'where', 'does', 'can', 'you', 'my', 'do', 'i', 'a', 'an', 'is', 'are', 'to', 'of', 'or', 'in', 'on', 'with', 'your', 'me', 'it', 'this', 'that', 'gousto']);
-    const terms = [...new Set(question.toLowerCase().match(/[\\p{L}\\p{N}]{3,}/gu) ?? [])].filter((x) => !stop.has(x));
+    const terms = [...new Set(question.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])].filter((x) => !stop.has(x));
     if (!terms.length) return null;
-    const sentences = evidence.flatMap((chunk) => chunk.text.split(/(?<=[.!?])\\s+|\\n+/).map((text) => text.trim()).filter(Boolean));
+    const sentences = evidence.flatMap((chunk) => chunk.text.split(/(?<=[.!?])\s+|\n+/).map((text) => text.trim()).filter(Boolean));
     const ranked = sentences.map((text) => ({ text, hits: terms.filter((term) => text.toLowerCase().includes(term)).length }))
       .filter((x) => x.hits > 0).sort((a, b) => b.hits - a.hits || a.text.length - b.text.length);
     const distinctive = terms.filter((term) => !['how', 'long', 'much', 'late', 'stay', 'fresh'].includes(term));
