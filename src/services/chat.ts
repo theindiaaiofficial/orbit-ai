@@ -154,6 +154,20 @@ export class ChatService {
     if (knowledgeQuestion) {
       [q] = await this.embedding.embed([query]);
       candidates = await this.vector.search(clientId, q!, k, threshold);
+      // Bounded semantic recall recovery for interrogative phrasing: remove
+      // grammatical scaffolding and retry the same tenant-scoped index. This
+      // is generic and bounded; it does not inject tenant facts or bypass the
+      // vector provider.
+      if (!candidates.length) {
+        const contentQuery = message
+          .replace(/\\b(?:who|what|when|where|why|how|which|can|could|do|does|is|are|will|may|should|please)\\b/gi, ' ')
+          .replace(/[?!.]/g, ' ').replace(/\\s+/g, ' ').trim();
+        if (contentQuery && contentQuery !== message) {
+          const [contentQ] = await this.embedding.embed([contentQuery]);
+          candidates = await this.vector.search(clientId, contentQ!, k, threshold);
+          debug?.('RETRIEVAL_RESULTS', { phase: 'content-query', query: safePreview(contentQuery, 240), candidateCount: candidates.length });
+        }
+      }
       debug?.('RETRIEVAL_RESULTS', { phase: 'initial', candidateCount: candidates.length, results: candidates.slice(0, MAX_CANDIDATES).map((x) => ({ chunkId: x.id, score: Number(x.score.toFixed(4)), excerpt: safePreview(x.text, 360) })) });
       console.info(JSON.stringify({ event: 'retrieval.initial', clientId, query: query.toLowerCase().replace(/\\s+/g, ' ').trim().slice(0, 240), embeddingDimension: q?.length ?? 0, topK: k, minSimilarity: client.config.minSimilarity ?? 0.05, candidateCount: candidates.length, scores: candidates.slice(0, 12).map((x) => Number(x.score.toFixed(4))), chunkIds: candidates.slice(0, 12).map((x) => x.id) }));
       if (!candidates.length && query !== message) {
