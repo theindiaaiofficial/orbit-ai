@@ -8,7 +8,7 @@ import { AppError } from '../lib/errors.js';
 import { groundingCorrection, validateGrounding } from './grounding.js';
 
 const MAX_CANDIDATES = 40;
-const MAX_EVIDENCE = 12;
+const MAX_EVIDENCE = 6;
 
 const DEBUG_QUESTION = 'How much does a PureGym day pass cost, and how long is it valid?';
 const DEBUG_GOUSTO_QUESTION = 'how long do gousto ingredients stay fresh?';
@@ -65,6 +65,20 @@ export class ChatService {
       .sort((a, b) => (Math.abs(b.x.score - a.x.score) > 0.08 ? b.x.score - a.x.score : (b.lexical - a.lexical) || (b.x.score - a.x.score)))
       .slice(0, MAX_EVIDENCE)
       .map((x) => x.x);
+  }
+
+  /** Extract only directly supported sentences when a provider refuses despite evidence. */
+  private evidenceBackedAnswer(question: string, evidence: RetrievedChunk[]) {
+    const stop = new Set(['the', 'and', 'for', 'how', 'what', 'when', 'where', 'does', 'can', 'you', 'my', 'do', 'i', 'a', 'an', 'is', 'are', 'to', 'of', 'or', 'in', 'on', 'with', 'your', 'me', 'it', 'this', 'that', 'gousto']);
+    const terms = [...new Set(question.toLowerCase().match(/[\\p{L}\\p{N}]{3,}/gu) ?? [])].filter((x) => !stop.has(x));
+    if (!terms.length) return null;
+    const sentences = evidence.flatMap((chunk) => chunk.text.split(/(?<=[.!?])\\s+|\\n+/).map((text) => text.trim()).filter(Boolean));
+    const ranked = sentences.map((text) => ({ text, hits: terms.filter((term) => text.toLowerCase().includes(term)).length }))
+      .filter((x) => x.hits > 0).sort((a, b) => b.hits - a.hits || a.text.length - b.text.length);
+    const distinctive = terms.filter((term) => !['how', 'long', 'much', 'late', 'stay', 'fresh'].includes(term));
+    const supported = ranked.filter((x) => x.hits >= 2 || (distinctive.length > 0 && x.hits >= 1 && distinctive.some((term) => x.text.toLowerCase().includes(term))));
+    if (!supported.length) return null;
+    return supported.slice(0, 2).map((x) => x.text).join(' ');
   }
 
   private isSummaryRequest(message: string) {
@@ -174,7 +188,7 @@ export class ChatService {
       p.debug?.('VALIDATION', { attempt: 2, grounded: check.ok && !isGenericFallback(answer), reasons: check.reasons, answer: safePreview(answer) });
       if (!check.ok || isGenericFallback(answer)) {
         p.debug?.('FALLBACK', { called: true, reason: check.reasons.length ? check.reasons : ['generic fallback after correction'] });
-        return professionalFallback(p.client);
+        return this.evidenceBackedAnswer(p.question, p.evidence) ?? professionalFallback(p.client);
       }
     }
     return answer;
@@ -213,7 +227,7 @@ export class ChatService {
           answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons.length ? check.reasons : ['generic fallback despite tenant evidence'])}`));
           check = validateGrounding(message, answer, p.evidence);
           p.debug?.('VALIDATION', { attempt: 2, grounded: check.ok && !isGenericFallback(answer), reasons: check.reasons, answer: safePreview(answer) });
-          if (!check.ok || isGenericFallback(answer)) { p.debug?.('FALLBACK', { called: true, reason: check.reasons.length ? check.reasons : ['generic fallback after correction'] }); answer = professionalFallback(p.client); }
+          if (!check.ok || isGenericFallback(answer)) { p.debug?.('FALLBACK', { called: true, reason: check.reasons.length ? check.reasons : ['generic fallback after correction'] }); answer = this.evidenceBackedAnswer(message, p.evidence) ?? professionalFallback(p.client); }
         }
       }
     }
