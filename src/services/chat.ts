@@ -10,6 +10,27 @@ import { groundingCorrection, validateGrounding } from './grounding.js';
 const MAX_CANDIDATES = 40;
 const MAX_EVIDENCE = 6;
 
+function focusEvidenceText(text: string, query: string) {
+  const normalized = text.replace(/\s+/g, ' ').trim();
+  const terms = [...new Set(query.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? [])]
+    .filter((term) => !new Set(['the', 'and', 'for', 'how', 'what', 'when', 'where', 'does', 'can', 'you', 'my', 'do', 'i', 'a', 'an', 'is', 'are', 'to', 'of', 'or', 'in', 'on', 'with', 'your', 'me', 'it', 'this', 'that']).has(term));
+  const faq = [...normalized.matchAll(/\*{0,2}Q:\s*(.*?)\*{0,2}\s+\*{0,2}A:\s*(.*?)(?=\s+\*{0,2}Q:|$)/gis)]
+    .map((match) => ({ question: match[1]!.trim(), answer: match[2]!.trim() }))
+    .filter((item) => item.answer);
+  if (faq.length) {
+    const ranked = faq.map((item) => {
+      const haystack = `${item.question} ${item.answer}`.toLowerCase();
+      return { item, hits: terms.filter((term) => haystack.includes(term)).length };
+    }).sort((a, b) => b.hits - a.hits);
+    if (ranked[0]!.hits > 0) return ranked.slice(0, 2).filter((x) => x.hits > 0).map((x) => x.item.answer).join(' ');
+  }
+  if (!terms.length) return normalized;
+  const sentences = normalized.split(/(?<=[.!?])\s+|\n+/).map((x) => x.trim()).filter(Boolean);
+  const ranked = sentences.map((sentence) => ({ sentence, hits: terms.filter((term) => sentence.toLowerCase().includes(term)).length }))
+    .filter((x) => x.hits > 0).sort((a, b) => b.hits - a.hits || a.sentence.length - b.sentence.length);
+  return ranked.length ? ranked.slice(0, 3).map((x) => x.sentence).join(' ') : normalized;
+}
+
 const DEBUG_QUESTION = 'How much does a PureGym day pass cost, and how long is it valid?';
 const DEBUG_GOUSTO_QUESTION = 'how long do gousto ingredients stay fresh?';
 const safePreview = (value: string, limit = 800) => value
@@ -36,6 +57,7 @@ function isGenericFallback(answer: string) {
 /** Remove ingestion/prompt scaffolding before any answer is persisted or streamed. */
 function cleanCustomerAnswer(answer: string) {
   let text = answer
+    .replace(/\\n/g, ' ')
     .replace(/```[a-z]*\s*/gi, '')
     .replace(/```/g, '')
     .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
@@ -48,6 +70,7 @@ function cleanCustomerAnswer(answer: string) {
   // Also handle providers that place markdown markers directly around the FAQ
   // labels or omit the separating whitespace.
   text = text.replace(/^\s*\**Q:\s*.*?\**\s*A:\s*/is, '').replace(/^\s*\**A:\s*/i, '');
+  text = text.replace(/(?:^|\s)#{1,6}\s*(?:FAQ|CONVERSATION|ESCALATION\s*\/\s*HUMAN CONTACT|POLICIES)\s*:?[\s-]*/gi, ' ');
   text = text.split(/\r?\n/)
     .filter((line) => !/^\s*(?:#{1,6}\s*)?(?:FAQ|CONVERSATION|ESCALATION\s*\/\s*HUMAN CONTACT|POLICIES)\s*:?[\s-]*$/i.test(line))
     .join(' ')
@@ -125,7 +148,7 @@ export class ChatService {
       // question set and retaining the 40-candidate retrieval ceiling.
       .filter(({ x }) => x.score >= best - 0.12)
       .slice(0, 3)
-      .map(({ x }) => x)
+      .map(({ x }) => ({ ...x, text: focusEvidenceText(x.text, query) }))
       .filter((x) => {
         const key = x.text.toLowerCase().replace(/\s+/g, ' ').trim();
         if (seen.has(key)) return false;
