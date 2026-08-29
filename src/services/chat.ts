@@ -225,8 +225,8 @@ export class ChatService {
       // vector provider.
       if (!candidates.length) {
         const contentQuery = message
-          .replace(/\\b(?:who|what|when|where|why|how|which|can|could|do|does|is|are|will|may|should|please)\\b/gi, ' ')
-          .replace(/[?!.]/g, ' ').replace(/\\s+/g, ' ').trim();
+          .replace(/\b(?:who|what|when|where|why|how|which|can|could|do|does|is|are|will|may|should|please)\b/gi, ' ')
+          .replace(/[?!.]/g, ' ').replace(/\s+/g, ' ').trim();
         if (contentQuery && contentQuery !== message) {
           const [contentQ] = await this.embedding.embed([contentQuery]);
           candidates = await this.vector.search(clientId, contentQ!, k, threshold);
