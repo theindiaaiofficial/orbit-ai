@@ -100,6 +100,14 @@ describe('generic RAG recovery and grounding path', () => {
     expect(result.answer).toContain('refund policy');
   });
 
+  it('removes internal FAQ scaffolding and duplicate sentences from customer answers', async () => {
+    const relevant = chunk('work', 'Choose recipes and receive ingredients and recipe cards at your door.', 0.82);
+    const { service } = fixture({ search: async () => [relevant], answer: async () => '## FAQ\\nQ: How does a recipe box work? A: Choose recipes and receive ingredients and recipe cards at your door. Choose recipes and receive ingredients and recipe cards at your door.' });
+    const result = await service.chat('tenant-a', 'How does the recipe box work?');
+    expect(result.answer).toBe('How does a recipe box work? Choose recipes and receive ingredients and recipe cards at your door.');
+    expect(result.answer).not.toMatch(/(?:^|\\s)(?:Q:|A:|## FAQ)/i);
+  });
+
   it('keeps a genuinely unknown question on the configured fallback', async () => {
     const { service, llm, vector } = fixture({ answer: async () => 'UNKNOWN' });
     const result = await service.chat('tenant-a', 'What is the meaning of life?');

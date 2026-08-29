@@ -33,6 +33,30 @@ function isGenericFallback(answer: string) {
   return /\b(?:sorry|apolog(?:y|ize|ise)|don['’]?t|do not)\b[\s,]*(?:have|know|possess)|\b(?:no|not)\s+(?:verified\s+)?information\b/i.test(answer);
 }
 
+/** Remove ingestion/prompt scaffolding before any answer is persisted or streamed. */
+function cleanCustomerAnswer(answer: string) {
+  let text = answer
+    .replace(/```[a-z]*\s*/gi, '')
+    .replace(/```/g, '')
+    .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
+    .replace(/(^|\s)Q:\s*/gi, '$1')
+    .replace(/(^|\s)A:\s*/gi, '$1')
+    .replace(/\b(?:CONVERSATION|ESCALATION\s*\/\s*HUMAN CONTACT|POLICIES)\b\s*:?[\s-]*/gi, '');
+  text = text.split(/\r?\n/)
+    .filter((line) => !/^\s*(?:#{1,6}\s*)?(?:FAQ|CONVERSATION|ESCALATION\s*\/\s*HUMAN CONTACT|POLICIES)\s*:?[\s-]*$/i.test(line))
+    .join(' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  const sentences = text.split(/(?<=[.!?])\s+/).map((s) => s.trim()).filter(Boolean);
+  const seen = new Set<string>();
+  return sentences.filter((sentence) => {
+    const key = sentence.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim();
+    if (!key || seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  }).join(' ').trim();
+}
+
 // Retrieval evidence alone is not enough: an answer must also address a
 // meaningful part of the current question. This prevents a relevant-to-tenant
 // but irrelevant chunk (or a stale session topic) from being presented as the
@@ -82,14 +106,26 @@ export class ChatService {
 
   private selectEvidence(candidates: RetrievedChunk[], query: string) {
     const terms = new Set(query.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []);
-    return [...candidates]
+    const ranked = [...candidates]
+      .filter((x) => x.text.trim().length > 0)
       .map((x) => ({ x, lexical: [...terms].filter((t) => x.text.toLowerCase().includes(t)).length }))
-      // Semantic similarity is the primary signal. Lexical overlap is only a
-      // deterministic tie-breaker for near-equal vectors; otherwise generic
-      // words such as “contact” must not displace the relevant chunk.
-      .sort((a, b) => (Math.abs(b.x.score - a.x.score) > 0.08 ? b.x.score - a.x.score : (b.lexical - a.lexical) || (b.x.score - a.x.score)))
-      .slice(0, MAX_EVIDENCE)
-      .map((x) => x.x);
+      // Semantic similarity is primary; lexical overlap only breaks near ties.
+      .sort((a, b) => (Math.abs(b.x.score - a.x.score) > 0.08 ? b.x.score - a.x.score : (b.lexical - a.lexical) || (b.x.score - a.x.score)));
+    const best = ranked[0]?.x.score ?? 0;
+    const seen = new Set<string>();
+    return ranked
+      // Do not send a long tail of merely tenant-related chunks to the model.
+      // Keep close-scoring candidates only, while allowing a modest multi-part
+      // question set and retaining the 40-candidate retrieval ceiling.
+      .filter(({ x }) => x.score >= best - 0.12)
+      .slice(0, 3)
+      .map(({ x }) => x)
+      .filter((x) => {
+        const key = x.text.toLowerCase().replace(/\s+/g, ' ').trim();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
   }
 
   /** Extract only directly supported sentences when a provider refuses despite evidence. */
@@ -218,14 +254,14 @@ export class ChatService {
       p.debug?.('FALLBACK', { called: true, reason: p.fallbackReason ?? 'no-evidence' });
       return professionalFallback(p.client);
     }
-    let answer = await this.llm.answer(this.input(p));
+    let answer = cleanCustomerAnswer(await this.llm.answer(this.input(p)));
     if (!knowledgeQuestion) return isGenericFallback(answer) ? professionalFallback(p.client) : answer;
     let check = validateGrounding(p.question, answer, p.evidence);
     p.debug?.('VALIDATION', { attempt: 1, grounded: check.ok && !isGenericFallback(answer), reasons: check.reasons, answer: safePreview(answer) });
     if (!check.ok || isGenericFallback(answer) || !questionEvidenceAligned(p.question, answer, p.evidence)) {
       const reasons = check.reasons.length ? check.reasons : ['generic fallback despite tenant evidence'];
       p.debug?.('CORRECTION', { triggered: true, reason: reasons });
-      answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(reasons)}`));
+      answer = cleanCustomerAnswer(await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(reasons)}`)));
       check = validateGrounding(p.question, answer, p.evidence);
       p.debug?.('VALIDATION', { attempt: 2, grounded: check.ok && !isGenericFallback(answer), reasons: check.reasons, answer: safePreview(answer) });
       if (!check.ok || isGenericFallback(answer) || !questionEvidenceAligned(p.question, answer, p.evidence)) {
@@ -259,14 +295,14 @@ export class ChatService {
       answer = professionalFallback(p.client);
     }
     else {
-      answer = await this.llm.streamAnswer(this.input(p), (token) => buffered.push(token));
+      answer = cleanCustomerAnswer(await this.llm.streamAnswer(this.input(p), (token) => buffered.push(token)));
       if (!knowledgeQuestion && isGenericFallback(answer)) answer = professionalFallback(p.client);
       if (knowledgeQuestion) {
         let check = validateGrounding(message, answer, p.evidence);
         p.debug?.('VALIDATION', { attempt: 1, grounded: check.ok && !isGenericFallback(answer), reasons: check.reasons, answer: safePreview(answer) });
         if (!check.ok || isGenericFallback(answer) || !questionEvidenceAligned(p.question, answer, p.evidence)) {
           p.debug?.('CORRECTION', { triggered: true, reason: check.reasons.length ? check.reasons : ['generic fallback despite tenant evidence'] });
-          answer = await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons.length ? check.reasons : ['generic fallback despite tenant evidence'])}`));
+          answer = cleanCustomerAnswer(await this.llm.answer(this.input(p, `${p.client.prompt}\n\n${groundingCorrection(check.reasons.length ? check.reasons : ['generic fallback despite tenant evidence'])}`)));
           check = validateGrounding(message, answer, p.evidence);
           p.debug?.('VALIDATION', { attempt: 2, grounded: check.ok && !isGenericFallback(answer), reasons: check.reasons, answer: safePreview(answer) });
           if (!check.ok || isGenericFallback(answer) || !questionEvidenceAligned(p.question, answer, p.evidence)) { p.debug?.('FALLBACK', { called: true, reason: check.reasons.length ? check.reasons : ['generic fallback after correction'] }); answer = this.evidenceBackedAnswer(message, p.evidence) ?? professionalFallback(p.client); }
