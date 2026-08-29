@@ -45,6 +45,9 @@ function cleanCustomerAnswer(answer: string) {
     .replace(/(^|\s)Q:\s*/gi, '$1')
     .replace(/(^|\s)A:\s*/gi, '$1')
     .replace(/\b(?:CONVERSATION|ESCALATION\s*\/\s*HUMAN CONTACT|POLICIES)\b\s*:?[\s-]*/gi, '');
+  // Also handle providers that place markdown markers directly around the FAQ
+  // labels or omit the separating whitespace.
+  text = text.replace(/^\s*\**Q:\s*.*?\**\s*A:\s*/is, '').replace(/^\s*\**A:\s*/i, '');
   text = text.split(/\r?\n/)
     .filter((line) => !/^\s*(?:#{1,6}\s*)?(?:FAQ|CONVERSATION|ESCALATION\s*\/\s*HUMAN CONTACT|POLICIES)\s*:?[\s-]*$/i.test(line))
     .join(' ')
