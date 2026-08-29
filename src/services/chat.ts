@@ -39,6 +39,9 @@ function cleanCustomerAnswer(answer: string) {
     .replace(/```[a-z]*\s*/gi, '')
     .replace(/```/g, '')
     .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
+    // FAQ-shaped generations repeat the source question before the answer;
+    // keep only the customer-facing answer portion.
+    .replace(/(?:^|\s)Q:\s*.*?\s+A:\s*/gis, ' ')
     .replace(/(^|\s)Q:\s*/gi, '$1')
     .replace(/(^|\s)A:\s*/gi, '$1')
     .replace(/\b(?:CONVERSATION|ESCALATION\s*\/\s*HUMAN CONTACT|POLICIES)\b\s*:?[\s-]*/gi, '');

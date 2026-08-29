@@ -104,7 +104,7 @@ describe('generic RAG recovery and grounding path', () => {
     const relevant = chunk('work', 'Choose recipes and receive ingredients and recipe cards at your door.', 0.82);
     const { service } = fixture({ search: async () => [relevant], answer: async () => '## FAQ\\nQ: How does a recipe box work? A: Choose recipes and receive ingredients and recipe cards at your door. Choose recipes and receive ingredients and recipe cards at your door.' });
     const result = await service.chat('tenant-a', 'How does the recipe box work?');
-    expect(result.answer).toBe('How does a recipe box work? Choose recipes and receive ingredients and recipe cards at your door.');
+    expect(result.answer).toBe('Choose recipes and receive ingredients and recipe cards at your door.');
     expect(result.answer).not.toMatch(/(?:^|\\s)(?:Q:|A:|## FAQ)/i);
   });
 
