@@ -209,7 +209,9 @@ describe('two-tenant production-readiness regressions', () => {
         message: 'BrightSmile Dental offers CometClean appointments on Saturday mornings.',
       },
     });
-    expect(northstarCross.json().answer).toBe('Not found in Northstar knowledge.');
+    expect(northstarCross.json().answer).toContain('provided by Northstar Solar');
+    expect(northstarCross.json().answer).not.toContain('CometClean');
+    expect(northstarCross.json().answer).not.toContain('BrightSmile Dental');
 
     const brightSmileCross = await app.inject({
       method: 'POST',
