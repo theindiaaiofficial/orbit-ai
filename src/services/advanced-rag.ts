@@ -12,6 +12,11 @@ const STOP = new Set([
 const tokens = (value: string) => [...new Set(value.toLocaleLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [])];
 const meaningful = (value: string) => tokens(value).filter((x) => !STOP.has(x));
 const normalize = (value: string) => value.replace(/\0/g, ' ').replace(/\s+/g, ' ').trim();
+const safeTrace = (value: string, limit = 800) => normalize(value)
+  .replace(/(?:sk|pk|api[_ -]?key|bearer)[=: ]+[A-Za-z0-9._-]+/gi, '[REDACTED_SECRET]')
+  .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]')
+  .replace(/(?:\+?\d[\d ()-]{7,}\d)/g, '[REDACTED_PHONE]')
+  .slice(0, limit);
 const phrase = (query: string) => normalize(query).toLocaleLowerCase();
 
 function bm25(query: string[], text: string, corpus: RetrievedChunk[]) {
@@ -53,8 +58,10 @@ export type EvidenceDecision = {
   rejected: Array<{ id: string; score: number; reason: string }>;
 };
 
+export type EvidenceTrace = (event: Record<string, unknown>) => void;
+
 /** Select at most three close-scoring, deduplicated, question-focused chunks. */
-export function selectFocusedEvidence(candidates: RetrievedChunk[], query: string, maxChars = 6000): EvidenceDecision {
+export function selectFocusedEvidence(candidates: RetrievedChunk[], query: string, maxChars = 6000, trace?: EvidenceTrace): EvidenceDecision {
   const clean = candidates.filter((x) => normalize(x.text).length > 0);
   const q = meaningful(query);
   const qPhrase = phrase(query);
@@ -101,6 +108,30 @@ export function selectFocusedEvidence(candidates: RetrievedChunk[], query: strin
     const item = combined.find((r) => r.x.id === x.id)!;
     const reason = !item ? 'invalid-empty-candidate' : item.x.score < best - 0.14 ? 'outside-score-band' : item.lexical === 0 && item.bm === 0 && item.exact === 0 ? 'no-question-term-or-phrase-match' : selected.length >= 3 ? 'evidence-cap' : 'duplicate-or-context-budget';
     return { id: x.id, score: Number(x.score.toFixed(4)), reason };
+  });
+  trace?.({
+    query: safeTrace(query),
+    candidateCount: clean.length,
+    bestVectorScore: Number(best.toFixed(6)),
+    maxChars,
+    ranks: combined.map((item) => ({
+      id: item.x.id,
+      source: safeTrace(item.x.source, 240),
+      excerpt: safeTrace(item.text, 700),
+      vectorScore: Number(item.x.score.toFixed(6)),
+      lexicalScore: Number(item.lexical.toFixed(6)),
+      bm25Score: Number(item.bm.toFixed(6)),
+      exactPhrase: item.exact > 0,
+      vectorRank: vectorRank.findIndex((x) => x.x.id === item.x.id) + 1,
+      lexicalRank: lexicalRank.findIndex((x) => x.x.id === item.x.id) + 1,
+      bm25Rank: bmRank.findIndex((x) => x.x.id === item.x.id) + 1,
+      fusedScore: Number(item.fused.toFixed(8)),
+      fusedRank: combined.findIndex((x) => x.x.id === item.x.id) + 1,
+      focusedExcerpt: safeTrace(answerFragment(item.text, query), 700),
+      selected: chosen.has(item.x.id),
+      rejection: rejected.find((x) => x.id === item.x.id)?.reason ?? null,
+    })),
+    selected: selected.map((x) => ({ id: x.id, source: safeTrace(x.source, 240), chars: x.text.length, excerpt: safeTrace(x.text, 1200) })),
   });
   return { evidence: selected, rejected };
 }

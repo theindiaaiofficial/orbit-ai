@@ -242,7 +242,7 @@ export class ChatService {
         candidates = await this.vector.search(clientId, messageQ!, k, threshold);
       }
     }
-    const initialDecision = selectFocusedEvidence(candidates, query);
+    const initialDecision = selectFocusedEvidence(candidates, query, 6000, debugEnabled ? (event) => debug?.('RAG_RANKING', event) : undefined);
     const initialEvidence = initialDecision.evidence;
     debug?.('RAG_REJECTED', { rejected: initialDecision.rejected });
     // Common words are not enough to establish that a candidate answers the
@@ -267,7 +267,7 @@ export class ChatService {
         evidenceQuery = reformulatedQueries[0] ?? query;
       }
     }
-    const finalDecision = selectFocusedEvidence(candidates, evidenceQuery);
+    const finalDecision = selectFocusedEvidence(candidates, evidenceQuery, 6000, debugEnabled ? (event) => debug?.('RAG_RANKING', event) : undefined);
     const evidence = finalDecision.evidence;
     debug?.('RAG_REJECTED', { rejected: finalDecision.rejected });
     debug?.('RAG_RETRIEVAL', { retrievedChunkCount: candidates.length, chunks: candidates.map((x) => ({ id: x.id, source: safePreview(x.source, 240), score: Number(x.score.toFixed(4)), chars: x.text.length, tokensApprox: Math.ceil(x.text.length / 4) })) });
