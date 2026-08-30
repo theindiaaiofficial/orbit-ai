@@ -105,7 +105,12 @@ export class OpenAICompatibleLlm implements LlmProvider {
     const payloadChars = messages.reduce((total, message) => total + message.content.length, 0);
     i.debug?.('FINAL_CONTEXT', { chars: contextText.length, tokensApprox: approxTokens(contextText), selectedChunkCount: i.context.length, preview: debugPreview(contextText, 2400) });
     i.debug?.('LLM_CONTEXT', { chars: contextText.length, tokensApprox: approxTokens(contextText), selectedChunkCount: i.context.length, preview: debugPreview(contextText, 2400) });
-    i.debug?.('LLM_MESSAGES', { historyIncluded: false, messages: messages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content), preview: debugPreview(m.content, 800) })) });
+    i.debug?.('LLM_MESSAGES', {
+      historyIncluded: boundedHistory.length > 0,
+      // Bounded, redacted message bodies prove the exact prompt boundary
+      // without retaining secrets or unbounded customer content.
+      messages: messages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content), content: debugPreview(m.content, 2400) })),
+    });
     const serializedPayloadChars = JSON.stringify({ model: this.config.model, stream, messages }).length;
     i.debug?.('LLM_REQUEST_SIZE', { provider: this.config.providerName, model: this.config.model, stream, messageCount: messages.length, inputChars: payloadChars, inputTokensApprox: approxTokens(JSON.stringify(messages)), serializedPayloadChars, serializedPayloadTokensApprox: approxTokens(JSON.stringify({ model: this.config.model, stream, messages })) });
     i.debug?.('LLM_REQUEST', { provider: this.config.providerName, model: this.config.model, stream, payloadChars, payloadTokensApprox: approxTokens(JSON.stringify(messages)), serializedPayloadChars, messages: messages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content) })) });

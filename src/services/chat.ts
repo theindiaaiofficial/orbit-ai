@@ -6,6 +6,7 @@ import type { LlmProvider, LlmInput, ChatDebug } from '../providers/llm.js';
 import type { Client, ChatMessage, RetrievedChunk } from '../domain/types.js';
 import { AppError } from '../lib/errors.js';
 import { groundingCorrection, validateGrounding } from './grounding.js';
+import { cleanAnswerScaffolding, selectFocusedEvidence } from './advanced-rag.js';
 
 const MAX_CANDIDATES = 40;
 const MAX_EVIDENCE = 6;
@@ -31,8 +32,6 @@ function focusEvidenceText(text: string, query: string) {
   return ranked.length ? ranked.slice(0, 3).map((x) => x.sentence).join(' ') : normalized;
 }
 
-const DEBUG_QUESTION = 'How much does a PureGym day pass cost, and how long is it valid?';
-const DEBUG_GOUSTO_QUESTION = 'how long do gousto ingredients stay fresh?';
 const safePreview = (value: string, limit = 800) => value
   .replace(/(?:sk|pk|api[_ -]?key|bearer)[=: ]+[A-Za-z0-9._-]+/gi, '[REDACTED_SECRET]')
   .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]')
@@ -56,6 +55,8 @@ function isGenericFallback(answer: string) {
 
 /** Remove ingestion/prompt scaffolding before any answer is persisted or streamed. */
 function cleanCustomerAnswer(answer: string) {
+  const advancedClean = cleanAnswerScaffolding(answer);
+  if (advancedClean !== answer.trim()) return advancedClean;
   let text = answer
     .replace(/\\n/g, ' ')
     .replace(/```[a-z]*\s*/gi, '')
@@ -118,19 +119,17 @@ export class ChatService {
     // Clearly general/conversational prompts remain provider-only.
     if (/\b(?:meaning of life|tell me a joke|write a poem|creative writing|weather today)\b/i.test(text)) return false;
     return /^(?:who|what|when|where|why|how|which|can|could|do|does|is|are|will|may|should|please)\b/i.test(text)
-      || /\?$/.test(text);
+      || /\?$/.test(text)
+      // Public chat also receives concise factual statements used as a
+      // knowledge lookup (and prompt-preview probes); retrieve them without
+      // introducing a tenant-specific allow-list.
+      || text.length >= 8;
   }
 
-  private retrievalQuery(message: string, history: ChatMessage[]) {
-    const lower = message.toLowerCase();
-    // Standalone factual questions must be embedded on their own. Short
-    // questions are common in chat, but length alone does not make a request a
-    // follow-up; mixing unrelated prior answers into the vector query can push
-    // the tenant's relevant chunk out of the semantic result. Only include
-    // history when the wording explicitly depends on earlier conversation.
-    const needsContext = /\b(?:it|that|this|they|them|there|those|he|she|previous|above|earlier|same|again|just)\b|\bwhat about\b|\bwhat did you\b/i.test(lower);
-    if (!needsContext || !history.length) return message;
-    return [...history.slice(-6).map((x) => `${x.role}: ${x.content}`), `user: ${message}`].join('\n');
+  private retrievalQuery(message: string) {
+    // Standalone RAG is deliberately independent of conversation history.
+    // Follow-up resolution is a later, separately accepted feature.
+    return message.trim();
   }
 
   private selectEvidence(candidates: RetrievedChunk[], query: string) {
@@ -192,9 +191,10 @@ export class ChatService {
     if (!client?.enabled) throw new AppError(403, 'TENANT_DISABLED', 'Tenant is disabled');
     const started = Date.now();
     const sid = sessionId ?? crypto.randomUUID();
-    const debugEnabled = process.env.ORBIT_TEMP_DEBUG_LLM_INPUT === '1'
-      || (process.env.ORBIT_TEMP_DEBUG_PUREGYM === '1' && message === DEBUG_QUESTION && process.env.ORBIT_TEMP_DEBUG_CLIENT_ID === clientId)
-      || (process.env.ORBIT_TEMP_DEBUG_GOUSTO === '1' && message === DEBUG_GOUSTO_QUESTION);
+    // Diagnostics are opt-in for every request and never keyed to a tenant,
+    // customer, or question. The resolved tenant is still emitted only as a
+    // bounded identifier in the structured event below.
+    const debugEnabled = process.env.ORBIT_RAG_DIAGNOSTICS === '1';
     const debug: ChatDebug | undefined = debugEnabled
       ? (stage, data) => console.info(JSON.stringify({ event: 'chat.temp-debug', traceId: sid, stage, ...data }))
       : undefined;
@@ -204,12 +204,14 @@ export class ChatService {
     const prior = (await this.repo.messages(conversationId)).slice(-12);
     await this.repo.addMessage(conversationId, 'user', message);
     const history = prior.slice(-12);
-    debug?.('HISTORY_STATUS', { loaded: true, sentToLlm: false, historyCount: 0, historyChars: 0, historyTokensApprox: 0, loadedMessageCount: history.length, loadedChars: history.reduce((total, item) => total + item.content.length, 0) });
     const summaryRequest = this.isSummaryRequest(message);
-    const query = this.retrievalQuery(message, history);
+    // History is persisted for product continuity, but is excluded from
+    // standalone retrieval and factual answer generation.
+    debug?.('HISTORY_STATUS', { loaded: true, sentToRag: false, sentToLlm: summaryRequest, historyCount: summaryRequest ? history.length : 0, historyChars: summaryRequest ? history.reduce((total, item) => total + item.content.length, 0) : 0, loadedMessageCount: history.length });
+    const query = this.retrievalQuery(message);
     debug?.('RAG_QUERY', { chars: query.length, tokensApprox: Math.ceil(query.length / 4), historyAdded: query !== message, historyMessageCount: history.length, boundedHistoryCount: Math.min(history.length, 6), queryPreview: safePreview(query, 240) });
     debug?.('RETRIEVAL_QUERY', { query: safePreview(query, 2400), queryChars: query.length, queryTokensApprox: Math.ceil(query.length / 4), historyAdded: query !== message, historyMessageCount: history.length, boundedHistoryCount: Math.min(history.length, 6) });
-    const k = Math.min(client.config.topK ?? MAX_CANDIDATES, MAX_CANDIDATES);
+    const k = Math.min(Math.max(client.config.topK ?? MAX_CANDIDATES, 20), MAX_CANDIDATES);
     const threshold = client.config.minSimilarity ?? 0.05;
     let candidates: RetrievedChunk[] = [];
     let evidenceQuery = query;
@@ -240,7 +242,9 @@ export class ChatService {
         candidates = await this.vector.search(clientId, messageQ!, k, threshold);
       }
     }
-    const initialEvidence = this.selectEvidence(candidates, query);
+    const initialDecision = selectFocusedEvidence(candidates, query);
+    const initialEvidence = initialDecision.evidence;
+    debug?.('RAG_REJECTED', { rejected: initialDecision.rejected });
     // Common words are not enough to establish that a candidate answers the
     // question. Require two meaningful terms, or one distinctive term, before
     // suppressing the one bounded recovery search.
@@ -263,7 +267,9 @@ export class ChatService {
         evidenceQuery = reformulatedQueries[0] ?? query;
       }
     }
-    const evidence = this.selectEvidence(candidates, evidenceQuery);
+    const finalDecision = selectFocusedEvidence(candidates, evidenceQuery);
+    const evidence = finalDecision.evidence;
+    debug?.('RAG_REJECTED', { rejected: finalDecision.rejected });
     debug?.('RAG_RETRIEVAL', { retrievedChunkCount: candidates.length, chunks: candidates.map((x) => ({ id: x.id, source: safePreview(x.source, 240), score: Number(x.score.toFixed(4)), chars: x.text.length, tokensApprox: Math.ceil(x.text.length / 4) })) });
     debug?.('RAG_CHUNKS', { selected: evidence.map((x) => ({ id: x.id, score: Number(x.score.toFixed(4)), source: safePreview(x.source, 240), chars: x.text.length, tokensApprox: Math.ceil(x.text.length / 4), preview: safePreview(x.text, 500) })) });
     debug?.('SELECTED_CHUNKS', { count: evidence.length, chars: evidence.reduce((total, x) => total + x.text.length, 0), tokensApprox: Math.ceil(evidence.reduce((total, x) => total + x.text.length, 0) / 4), ids: evidence.map((x) => x.id) });
@@ -274,7 +280,16 @@ export class ChatService {
   }
 
   private input(p: Prepared, prompt = p.client.prompt): LlmInput {
-    return { question: p.question, prompt, context: p.evidence, config: p.client.config, history: p.history, debug: p.debug };
+    return {
+      question: p.question,
+      prompt,
+      context: p.evidence,
+      config: p.client.config,
+      // Explicit summaries retain their existing product behavior; factual
+      // tenant RAG never receives prior messages.
+      history: this.isSummaryRequest(p.question) ? p.history : [],
+      debug: p.debug,
+    };
   }
 
   private async groundedAnswer(p: Prepared) {
