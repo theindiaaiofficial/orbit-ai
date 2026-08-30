@@ -1,6 +1,7 @@
 import type { ChatMessage, ClientConfig, ProviderHealth, RetrievedChunk } from '../domain/types.js';
 import type { LlmConfig } from '../config/llm.js';
-export interface LlmInput { question: string; prompt: string; context: RetrievedChunk[]; config: ClientConfig; history?: ChatMessage[] }
+export type ChatDebug = (stage: string, data: Record<string, unknown>) => void;
+export interface LlmInput { question: string; prompt: string; context: RetrievedChunk[]; config: ClientConfig; history?: ChatMessage[]; debug?: ChatDebug }
 export interface LlmProvider {
   readonly name: string;
   answer(input: LlmInput): Promise<string>;
@@ -12,6 +13,12 @@ export interface LlmProvider {
 type Fetch = typeof fetch;
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const retryable = (status: number) => [408, 409, 425, 429].includes(status) || status >= 500;
+const approxTokens = (value: string) => Math.ceil(value.length / 4);
+const debugPreview = (value: string, limit = 800) => value
+  .replace(/(?:sk|pk|api[_ -]?key|bearer)[=: ]+[A-Za-z0-9._-]+/gi, '[REDACTED_SECRET]')
+  .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]')
+  .replace(/(?:\\+?\\d[\\d ()-]{7,}\\d)/g, '[REDACTED_PHONE]')
+  .slice(0, limit);
 
 /** Customer-facing identity is tenant configuration, never the model/provider. */
 export function tenantIdentityPolicy(config: ClientConfig) {
@@ -87,12 +94,26 @@ export class OpenAICompatibleLlm implements LlmProvider {
   private payload(i: LlmInput, stream: boolean) {
     const context = i.context.map((x, n) => `[${n + 1}] ${x.text}`).join('\n');
     const policy = `${tenantIdentityPolicy(i.config)}\n${i.prompt}\nStrict grounding policy: For tenant-specific factual questions, answer only from TENANT KNOWLEDGE below. TENANT KNOWLEDGE is authoritative and overrides pretrained/model knowledge. The following tenant knowledge is verified evidence for this tenant and must be treated as authoritative. Do not invent or infer missing prices, availability, policies, features, guarantees, fees, locations, dates, or operating details. Preserve qualifications such as “starting from”, gym/location dependence, eligibility, and terms. If evidence explicitly says UNKNOWN or the requested fact is absent, say it is not available; do not use the fallback merely because the question is phrased differently from the evidence in the current tenant knowledge and direct the customer to the official support route when appropriate. Distinguish verified facts from assumptions. Use bounded CONVERSATION history only to resolve follow-ups. For an explicit summary or recap request, summarize that bounded conversation history and do not require tenant knowledge. For greetings and general conversation, respond naturally without requiring tenant knowledge. If the question is tenant-specific and evidence is empty, use this fallback: ${i.config.fallbackMessage}`;
+    const boundedHistory = (i.history ?? []).slice(-8);
     const messages = [
       { role: 'system', content: `SYSTEM POLICY\n${policy}` },
-      ...(i.history ?? []).slice(-12).map((x) => ({ role: x.role, content: x.content })),
       { role: 'system', content: `TENANT KNOWLEDGE (authoritative, tenant-scoped)\n${context || '(none)'}` },
+      ...boundedHistory.map((m) => ({ role: m.role, content: `CONVERSATION\n${m.content}` })),
       { role: 'user', content: `USER\nQuestion: ${i.question}` },
     ];
+    const contextText = context || '(none)';
+    const payloadChars = messages.reduce((total, message) => total + message.content.length, 0);
+    i.debug?.('FINAL_CONTEXT', { chars: contextText.length, tokensApprox: approxTokens(contextText), selectedChunkCount: i.context.length, preview: debugPreview(contextText, 2400) });
+    i.debug?.('LLM_CONTEXT', { chars: contextText.length, tokensApprox: approxTokens(contextText), selectedChunkCount: i.context.length, preview: debugPreview(contextText, 2400) });
+    i.debug?.('LLM_MESSAGES', {
+      historyIncluded: boundedHistory.length > 0,
+      // Bounded, redacted message bodies prove the exact prompt boundary
+      // without retaining secrets or unbounded customer content.
+      messages: messages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content), content: debugPreview(m.content, 2400) })),
+    });
+    const serializedPayloadChars = JSON.stringify({ model: this.config.model, stream, messages }).length;
+    i.debug?.('LLM_REQUEST_SIZE', { provider: this.config.providerName, model: this.config.model, stream, messageCount: messages.length, inputChars: payloadChars, inputTokensApprox: approxTokens(JSON.stringify(messages)), serializedPayloadChars, serializedPayloadTokensApprox: approxTokens(JSON.stringify({ model: this.config.model, stream, messages })) });
+    i.debug?.('LLM_REQUEST', { provider: this.config.providerName, model: this.config.model, stream, payloadChars, payloadTokensApprox: approxTokens(JSON.stringify(messages)), serializedPayloadChars, messages: messages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content) })) });
     return { model: this.config.model, temperature: this.config.sampling.temperature,
       ...(this.config.sampling.topP === undefined ? {} : { top_p: this.config.sampling.topP }),
       ...(this.config.sampling.maxTokens === undefined ? {} : { max_tokens: this.config.sampling.maxTokens }), stream, messages };
@@ -103,7 +124,10 @@ export class OpenAICompatibleLlm implements LlmProvider {
     const r = await this.request(this.url(this.config.chatPath), { method: 'POST', headers: this.headers(), body: JSON.stringify(this.payload(i, false)) }, this.config.maxRetries);
     if (!r.ok) throw new Error(`LLM provider failed (${r.status})`);
     const j = await r.json() as { choices?: { message?: { content?: string } }[] };
-    return j.choices?.[0]?.message?.content ?? i.config.fallbackMessage;
+    const answer = j.choices?.[0]?.message?.content ?? i.config.fallbackMessage;
+    i.debug?.('LLM_RESPONSE', { stream: false, chars: answer.length, tokensApprox: approxTokens(answer), preview: debugPreview(answer, 2400) });
+    i.debug?.('RAW_LLM_RESPONSE', { stream: false, chars: answer.length, tokensApprox: approxTokens(answer), preview: debugPreview(answer, 2400) });
+    return answer;
   }
   async streamAnswer(i: LlmInput, onToken: (token: string) => void) {
     const identity = tenantIdentityAnswer(i.question, i.config);
@@ -117,6 +141,8 @@ export class OpenAICompatibleLlm implements LlmProvider {
       try { const token = (JSON.parse(line.slice(6)) as { choices?: { delta?: { content?: string } }[] }).choices?.[0]?.delta?.content ?? ''; if (token) { answer += token; onToken(token); } } catch { /* ignore incomplete provider frames */ }
     };
     while (true) { const { value, done } = await reader.read(); buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done }); const lines = buffer.split('\n'); buffer = lines.pop() ?? ''; lines.forEach(emit); if (done) break; }
+    i.debug?.('LLM_RESPONSE', { stream: true, chars: answer.length, tokensApprox: approxTokens(answer), preview: debugPreview(answer, 2400) });
+    i.debug?.('RAW_LLM_RESPONSE', { stream: true, chars: answer.length, tokensApprox: approxTokens(answer), preview: debugPreview(answer, 2400) });
     if (!answer) {
       // Some OpenAI-compatible gateways advertise streaming but emit no parseable
       // delta frames. Recover through the same provider's bounded non-streaming
@@ -137,10 +163,16 @@ export class OpenAICompatibleLlm implements LlmProvider {
         { role: 'user', content: `Conversation:\n${history || '(none)'}\nCurrent request: ${i.question}` },
       ],
     };
+    const reformulationMessages = payload.messages;
+    const reformulationChars = reformulationMessages.reduce((total, message) => total + message.content.length, 0);
+    i.debug?.('LLM_CONTEXT', { chars: 0, tokensApprox: 0, preview: '(reformulation request has no tenant context)' });
+    i.debug?.('LLM_MESSAGES', { historyIncluded: history.length > 0, messages: reformulationMessages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content), preview: debugPreview(m.content, 800) })) });
+    i.debug?.('LLM_REQUEST', { provider: this.config.providerName, model: this.config.model, stream: false, payloadChars: reformulationChars, payloadTokensApprox: approxTokens(JSON.stringify(reformulationMessages)), messages: reformulationMessages.map((m) => ({ role: m.role, chars: m.content.length, tokensApprox: approxTokens(m.content) })) });
     const r = await this.request(this.url(this.config.chatPath), { method: 'POST', headers: this.headers(), body: JSON.stringify(payload) }, 0);
     if (!r.ok) return null;
     const j = await r.json() as { choices?: { message?: { content?: string } }[] };
     const query = j.choices?.[0]?.message?.content?.trim().replace(/^['\"]|['\"]$/g, '');
+    i.debug?.('RAW_LLM_RESPONSE', { stream: false, chars: query?.length ?? 0, tokensApprox: approxTokens(query ?? ''), preview: debugPreview(query ?? '', 2400) });
     return query && query.toUpperCase() !== 'NONE' ? query : null;
   }
   async health(): Promise<ProviderHealth> {

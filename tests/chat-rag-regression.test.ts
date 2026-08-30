@@ -36,6 +36,15 @@ describe('generic RAG recovery and grounding path', () => {
     expect(selected[0].id).toBe('answer');
   });
 
+  it('promotes a clearly lexical tenant answer when semantic scores are near-tied', async () => {
+    const { service } = fixture();
+    const selected = (service as any).selectEvidence([
+      chunk('generic', 'Gousto is a flexible recipe box company.', 0.264),
+      chunk('sizes', 'Box sizes are designed for 1 to 5 people; customers can choose 2 to 5 recipes.', 0.213),
+    ], 'What recipe box sizes do you offer?');
+    expect(selected[0].id).toBe('sizes');
+  });
+
   it('recovers after a weak first hit and merges recovered tenant evidence', async () => {
     const relevant = chunk('care', 'For assistance, customers can contact the Customer Care team by email.', 0.79);
     let searchCount = 0;
@@ -60,6 +69,51 @@ describe('generic RAG recovery and grounding path', () => {
     const result = await service.chat('tenant-a', 'How can I contact Customer Care?');
     expect(llm.answer).toHaveBeenCalledTimes(2);
     expect(result.answer).toContain('020 3011 1002');
+  });
+
+  it('retrieves evidence through the live chat path for the Gousto freshness question', async () => {
+    const relevant = chunk('freshness', 'Gousto ingredients stay fresh for the period shown on the use-by label.', 0.82);
+    const { service, embedding, vector } = fixture({ search: async () => [relevant] });
+    const result = await service.chat('tenant-a', 'how long do gousto ingredients stay fresh?');
+    expect(embedding.embed).toHaveBeenCalledWith(['how long do gousto ingredients stay fresh?']);
+    expect(vector.search).toHaveBeenCalledOnce();
+    expect(result.sources[0]?.chunkId).toBe('freshness');
+    expect(result.answer).toContain('Gousto ingredients stay fresh');
+  });
+
+  it('retrieves evidence through the live chat path for the Airtasker posting question', async () => {
+    const relevant = chunk('posting', 'To post a task, describe what you need, add a budget, and publish it for Taskers to see.', 0.82);
+    const { service, embedding, vector } = fixture({ search: async () => [relevant] });
+    const result = await service.chat('tenant-a', 'How do I post a task on Airtasker?');
+    expect(embedding.embed).toHaveBeenCalledWith(['How do I post a task on Airtasker?']);
+    expect(vector.search).toHaveBeenCalledOnce();
+    expect(result.sources[0]?.chunkId).toBe('posting');
+    expect(result.answer).toContain('post a task');
+  });
+
+  it('retrieves evidence for a normal known knowledge question', async () => {
+    const relevant = chunk('refunds', 'Refund requests are reviewed under the published refund policy.', 0.82);
+    const { service, vector } = fixture({ search: async () => [relevant] });
+    const result = await service.chat('tenant-a', 'What is your refund policy?');
+    expect(vector.search).toHaveBeenCalledOnce();
+    expect(result.sources[0]?.chunkId).toBe('refunds');
+    expect(result.answer).toContain('refund policy');
+  });
+
+  it('removes internal FAQ scaffolding and duplicate sentences from customer answers', async () => {
+    const relevant = chunk('work', 'Choose recipes and receive ingredients and recipe cards at your door.', 0.82);
+    const { service } = fixture({ search: async () => [relevant], answer: async () => '## FAQ\\nQ: How does a recipe box work? A: Choose recipes and receive ingredients and recipe cards at your door. Choose recipes and receive ingredients and recipe cards at your door.' });
+    const result = await service.chat('tenant-a', 'How does the recipe box work?');
+    expect(result.answer).toBe('Choose recipes and receive ingredients and recipe cards at your door.');
+    expect(result.answer).not.toMatch(/(?:^|\\s)(?:Q:|A:|## FAQ)/i);
+  });
+
+  it('keeps a genuinely unknown question on the configured fallback', async () => {
+    const { service, llm, vector } = fixture({ answer: async () => 'UNKNOWN' });
+    const result = await service.chat('tenant-a', 'What is the meaning of life?');
+    expect(vector.search).not.toHaveBeenCalled();
+    expect(llm.answer).toHaveBeenCalledOnce();
+    expect(result.answer).toBe('UNKNOWN');
   });
 
   it('keeps standalone factual retrieval independent of prior chat answers', async () => {
