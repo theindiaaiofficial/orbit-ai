@@ -175,7 +175,7 @@ export function buildEvidenceContext(chunks: RetrievedChunk[]) {
 }
 
 export function cleanAnswerScaffolding(answer: string) {
-  const cleaned = answer.replace(/^\s*(?:#{1,6}\s*)?(?:faq|answer)\s*:?\s*/i, '').replace(/(?:^|\n)\s*[QA]:\s*/gi, ' ').replace(/\s+/g, ' ').trim();
+  const cleaned = answer.replace(/^\s*(?:#{1,6}\s*)?(?:faq|answer)\s*:?\s*/i, '').replace(/(?:^|\n)\s*[QA]:\s*/gi, ' ').replace(/\*{1,3}([^*\n]+)\*{1,3}/g, '$1').replace(/`([^`\n]+)`/g, '$1').replace(/\s+/g, ' ').trim();
   const sentences = cleaned.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [];
   const seen = new Set<string>();
   return sentences.filter((sentence) => { const key = comparable(sentence); if (!key || seen.has(key)) return false; seen.add(key); return true; }).join(' ').trim();
