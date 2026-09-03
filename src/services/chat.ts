@@ -6,6 +6,7 @@ import type { LlmProvider } from '../providers/llm.js';
 import type { Client, ChatMessage, RetrievedChunk } from '../domain/types.js';
 import { AppError } from '../lib/errors.js';
 import { cleanAnswerScaffolding, retrieveAdvancedEvidence, type EvidenceDecision, type RetrievalDiagnostics } from './advanced-rag.js';
+import { groundingCorrection, validateGrounding } from './grounding.js';
 
 type ChatResult = {
   sessionId: string;
@@ -29,6 +30,7 @@ type Prepared = {
 
 const summaryRequest = (message: string) => /\b(summarize|summary|recap|what did we discuss|what you just said)\b/i.test(message);
 const clearlyGeneral = (message: string) => /^(hi|hello|hey|thanks|thank you|okay|ok|good morning|good afternoon|good evening|how are you|tell me a joke|what is the meaning of life)[!.? ]*$/i.test(message.trim());
+const answerTokens = (answer: string) => answer.match(/\S+\s*/g) ?? [];
 
 /** Tenant-scoped orchestration. Retrieval is always attempted for the current question; history is summary-only. */
 export class ChatService {
@@ -58,11 +60,33 @@ export class ChatService {
     });
   }
 
+  /**
+   * Generate once, validate against the exact selected tenant evidence, and allow
+   * one bounded correction generation. A failed correction is never shown.
+   */
+  private async answerWithGrounding(prepared: Prepared, question: string, prompt = prepared.client.prompt) {
+    const first = cleanAnswerScaffolding(await this.llm.answer(this.input(prepared, question, prompt)));
+    const firstCheck = validateGrounding(question, first, prepared.found);
+    if (firstCheck.ok) return first;
+
+    const corrected = cleanAnswerScaffolding(await this.llm.answer(
+      this.input(prepared, question, `${prompt}\n${groundingCorrection(firstCheck.reasons)}`),
+    ));
+    return validateGrounding(question, corrected, prepared.found).ok
+      ? corrected
+      : prepared.client.config.fallbackMessage;
+  }
+
   async preview(clientId: string, message: string, prompt: string) {
     const retrieval = await this.retrieve(clientId, message);
-    const input = { question: message, prompt, context: retrieval.evidence, config: retrieval.client.config };
-    const answer = retrieval.decision.sufficient || clearlyGeneral(message) ? await this.llm.answer(input) : retrieval.client.config.fallbackMessage;
-    return { answer: cleanAnswerScaffolding(answer), retrieval };
+    const prepared = {
+      client: retrieval.client, sid: '', conversationId: '', history: [], found: retrieval.evidence,
+      decision: retrieval.decision, diagnostics: retrieval.diagnostics, started: Date.now(), summary: false,
+    } satisfies Prepared;
+    const answer = retrieval.decision.sufficient || clearlyGeneral(message)
+      ? await this.answerWithGrounding(prepared, message, prompt)
+      : retrieval.client.config.fallbackMessage;
+    return { answer, retrieval };
   }
 
   private async prepare(clientId: string, message: string, sessionId?: string): Promise<Prepared> {
@@ -88,7 +112,6 @@ export class ChatService {
       prompt: `${prompt}\nEvidence decision: ${prepared.decision.status}. Answer only supported portions. If evidence is partial, state the supported portion and clearly qualify what is not available. If evidence is uncertain or absent for a tenant-specific fact, use the configured fallback message.`,
       context: prepared.found,
       config: prepared.client.config,
-
     };
   }
 
@@ -115,23 +138,34 @@ export class ChatService {
     const prepared = await this.prepare(clientId, message, sessionId);
     if (prepared.summary) return this.finalize(prepared, prepared.client.config.fallbackMessage);
     if (!prepared.decision.sufficient && !clearlyGeneral(message)) return this.finalize(prepared, prepared.client.config.fallbackMessage);
-    const answer = await this.llm.answer(this.input(prepared, message));
-    return this.finalize(prepared, answer);
+    return this.finalize(prepared, await this.answerWithGrounding(prepared, message));
   }
 
   async stream(clientId: string, message: string, sessionId: string | undefined, onToken: (token: string) => void): Promise<ChatResult> {
     const prepared = await this.prepare(clientId, message, sessionId);
     if (prepared.summary) {
       const fallback = prepared.client.config.fallbackMessage;
-      for (const token of fallback.match(/\S+\s*/g) ?? []) onToken(token);
+      for (const token of answerTokens(fallback)) onToken(token);
       return this.finalize(prepared, fallback);
     }
     if (!prepared.decision.sufficient && !clearlyGeneral(message)) {
       const fallback = prepared.client.config.fallbackMessage;
-      for (const token of fallback.match(/\S+\s*/g) ?? []) onToken(token);
+      for (const token of answerTokens(fallback)) onToken(token);
       return this.finalize(prepared, fallback);
     }
-    const answer = await this.llm.streamAnswer(this.input(prepared, message), onToken);
+
+    // Do not expose provider tokens until the complete answer has passed grounding.
+    let streamed = '';
+    await this.llm.streamAnswer(this.input(prepared, message), (token) => { streamed += token; });
+    let answer = cleanAnswerScaffolding(streamed);
+    const check = validateGrounding(message, answer, prepared.found);
+    if (!check.ok) {
+      answer = cleanAnswerScaffolding(await this.llm.answer(
+        this.input(prepared, message, `${prepared.client.prompt}\n${groundingCorrection(check.reasons)}`),
+      ));
+      if (!validateGrounding(message, answer, prepared.found).ok) answer = prepared.client.config.fallbackMessage;
+    }
+    for (const token of answerTokens(answer)) onToken(token);
     return this.finalize(prepared, answer);
   }
 }
