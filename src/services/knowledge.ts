@@ -21,7 +21,8 @@ export class KnowledgeService {
       clientId,
       name,
       parts.map((x, i) => ({
-        id: crypto.randomUUID(),
+        // Stable IDs make reindexing deterministic and prevent duplicate chunks.
+        id: crypto.createHash('sha256').update(`${clientId}\0${name}\0${i}\0${x}`).digest('hex'),
         clientId,
         source: name,
         text: x,
@@ -70,7 +71,10 @@ export class KnowledgeService {
     await this.vectors.deleteTenant(clientId);
     await this.vectors.upsert(
       clientId,
-      all.map((x, i) => ({ id: crypto.randomUUID(), clientId, ...x, embedding: e[i]! })),
+      all.map((x, i) => ({
+        id: crypto.createHash('sha256').update(`${clientId}\0${x.source}\0${i}\0${x.text}`).digest('hex'),
+        clientId, ...x, embedding: e[i]!,
+      })),
     );
     return { files: names.length, chunks: all.length };
   }

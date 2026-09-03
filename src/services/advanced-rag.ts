@@ -1,149 +1,198 @@
 import type { RetrievedChunk } from '../domain/types.js';
 
-/**
- * TypeScript production adapter for the standalone Advanced RAG principles.
- * Retrieval is intentionally split into broad candidate recall and narrow
- * evidence selection. The vector provider remains the durable tenant-scoped
- * store; lexical/BM25 signals are computed over its bounded candidate set.
- */
-const STOP = new Set([
-  'the','and','for','how','what','when','where','why','does','can','could','you','your','my','do','i','a','an','is','are','to','of','or','in','on','with','me','it','this','that','please','tell','about','have','has','from','our','they','them','their','will','would','should','which','who',
-]);
-const tokens = (value: string) => [...new Set(value.toLocaleLowerCase().match(/[\p{L}\p{N}]{2,}/gu) ?? [])];
-const meaningful = (value: string) => tokens(value).filter((x) => !STOP.has(x));
-const normalize = (value: string) => value.replace(/\0/g, ' ').replace(/\s+/g, ' ').trim();
-const safeTrace = (value: string, limit = 800) => normalize(value)
-  .replace(/(?:sk|pk|api[_ -]?key|bearer)[=: ]+[A-Za-z0-9._-]+/gi, '[REDACTED_SECRET]')
-  .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]')
-  .replace(/(?:\+?\d[\d ()-]{7,}\d)/g, '[REDACTED_PHONE]')
-  .slice(0, limit);
-const phrase = (query: string) => normalize(query).toLocaleLowerCase();
-
-function bm25(query: string[], text: string, corpus: RetrievedChunk[]) {
-  const words = tokens(text);
-  const counts = new Map<string, number>();
-  for (const word of words) counts.set(word, (counts.get(word) ?? 0) + 1);
-  const avg = Math.max(1, corpus.reduce((n, x) => n + tokens(x.text).length, 0) / Math.max(1, corpus.length));
-  const length = words.length;
-  return query.reduce((score, term) => {
-    const tf = counts.get(term) ?? 0;
-    if (!tf) return score;
-    const df = corpus.filter((x) => tokens(x.text).includes(term)).length;
-    const idf = Math.log(1 + (corpus.length - df + 0.5) / (df + 0.5));
-    return score + idf * ((tf * 2.2) / (tf + 1.2 * (0.8 + 0.2 * length / avg)));
-  }, 0);
-}
-
-function rrf(rank: number, k = 60) { return 1 / (k + rank + 1); }
-
-function answerFragment(text: string, query: string) {
-  const clean = normalize(text);
-  const faq = [...clean.matchAll(/\*{0,2}Q:\s*(.*?)\*{0,2}\s+\*{0,2}A:\s*(.*?)(?=\s+\*{0,2}Q:|$)/gis)]
-    .map((m) => ({ q: m[1]!.trim(), a: m[2]!.trim() }))
-    .filter((x) => x.a);
-  const qTerms = meaningful(query);
-  if (faq.length) {
-    const ranked = faq.map((x) => ({ x, hits: meaningful(`${x.q} ${x.a}`).filter((t) => qTerms.includes(t)).length }))
-      .filter((x) => x.hits > 0).sort((a, b) => b.hits - a.hits);
-    if (ranked.length) return ranked.slice(0, 2).map((x) => x.x.a).join(' ');
-  }
-  const sentences = clean.split(/(?<=[.!?])\s+|\n+/).map((x) => x.trim()).filter(Boolean);
-  const ranked = sentences.map((s) => ({ s, hits: meaningful(s).filter((t) => qTerms.includes(t)).length }))
-    .filter((x) => x.hits > 0).sort((a, b) => b.hits - a.hits || a.s.length - b.s.length);
-  return ranked.length ? ranked.slice(0, 3).map((x) => x.s).join(' ') : clean;
-}
-
+export type EvidenceStatus = 'SUPPORTED' | 'PARTIALLY_SUPPORTED' | 'UNCERTAIN' | 'NOT_SUPPORTED';
 export type EvidenceDecision = {
+  status: EvidenceStatus;
+  coverage: number;
+  count: number;
+  sources: number;
+  sufficient: boolean;
+};
+export type RetrievalDiagnostics = {
+  query: string;
+  expanded: boolean;
+  profile: { documents: number; chunks: number; vocabulary: number; topTerms: string[] };
+  candidateCounts: { exact: number; keyword: number; bm25: number; dense: number; fused: number };
+  evidence: EvidenceDecision;
+  rejected: Array<{ id: string; reason: string }>;
+};
+export type AdvancedRetrieval = {
   evidence: RetrievedChunk[];
-  rejected: Array<{ id: string; score: number; reason: string }>;
+  decision: EvidenceDecision;
+  diagnostics: RetrievalDiagnostics;
 };
 
-export type EvidenceTrace = (event: Record<string, unknown>) => void;
+const STOPWORDS = new Set(['a', 'an', 'the', 'is', 'are', 'was', 'were', 'what', 'which', 'who', 'how', 'much', 'does', 'do', 'did', 'of', 'for', 'to', 'in', 'on', 'and', 'or', 'will', 'can', 'i', 'my', 'it', 'this', 'that', 'with', 'when', 'where', 'why']);
+const SYNONYMS: Record<string, string> = { cancellation: 'cancel', canceled: 'cancel', cancelled: 'cancel', receive: 'refund', received: 'refund', back: 'refund', money: 'refund', flat: 'property', homes: 'property', home: 'property' };
+const MAX_CANDIDATES = 40;
+const RETRIEVAL_K = 20;
+const FINAL_K = 8;
+const CONTEXT_CHARS = 7000;
 
-/** Select at most three close-scoring, deduplicated, question-focused chunks. */
-export function selectFocusedEvidence(candidates: RetrievedChunk[], query: string, maxChars = 6000, trace?: EvidenceTrace): EvidenceDecision {
-  const clean = candidates.filter((x) => normalize(x.text).length > 0);
-  const q = meaningful(query);
-  const qPhrase = phrase(query);
-  const ranked = clean.map((x) => {
-    const text = normalize(x.text);
-    const terms = meaningful(text);
-    const lexical = q.filter((t) => terms.includes(t)).length / Math.max(1, q.length);
-    const exact = qPhrase.length > 8 && text.toLocaleLowerCase().includes(qPhrase) ? 1 : 0;
-    const bm = bm25(q, text, clean);
-    return { x, text, lexical, exact, bm };
+export const tokens = (value: string) =>
+  (value.toLowerCase().match(/[\p{L}\p{N}_/-]+/gu) ?? [])
+    .map((token) => SYNONYMS[token] ?? token)
+    .filter((token) => !STOPWORDS.has(token));
+const overlap = (query: Set<string>, text: string) => [...query].filter((token) => tokens(text).includes(token)).length;
+const comparable = (text: string) => text.toLowerCase().replace(/\s+/g, ' ').trim();
+const byScore = (items: Array<{ chunk: RetrievedChunk; score: number }>) =>
+  items.sort((a, b) => b.score - a.score || a.chunk.id.localeCompare(b.chunk.id));
+
+export function exactSearch(query: string, chunks: RetrievedChunk[], limit = RETRIEVAL_K) {
+  const normalized = comparable(query);
+  const queryTerms = new Set(tokens(query));
+  const phrases = chunks.filter((chunk) => normalized.length > 0 && comparable(chunk.text).includes(normalized));
+  const phraseIds = new Set(phrases.map((chunk) => chunk.id));
+  const rest = byScore(chunks.filter((chunk) => !phraseIds.has(chunk.id) && overlap(queryTerms, chunk.text) > 0).map((chunk) => ({ chunk, score: overlap(queryTerms, chunk.text) }))).map((x) => x.chunk);
+  return [...phrases, ...rest].slice(0, limit);
+}
+
+export function keywordSearch(query: string, chunks: RetrievedChunk[], limit = RETRIEVAL_K) {
+  const queryTerms = new Set(tokens(query));
+  return byScore(chunks.map((chunk) => ({ chunk, score: overlap(queryTerms, chunk.text) + chunk.text.length / 1_000_000 }))).map((x) => x.chunk).slice(0, limit);
+}
+
+export function bm25Search(query: string, chunks: RetrievedChunk[], limit = RETRIEVAL_K) {
+  const terms = tokens(query);
+  const docs = chunks.map((chunk) => tokens(chunk.text));
+  const averageLength = docs.reduce((sum, doc) => sum + doc.length, 0) / Math.max(docs.length, 1);
+  const documentFrequency = new Map<string, number>();
+  for (const doc of docs) for (const term of new Set(doc)) documentFrequency.set(term, (documentFrequency.get(term) ?? 0) + 1);
+  return byScore(chunks.map((chunk, index) => {
+    const doc = docs[index]!;
+    const frequency = new Map<string, number>();
+    for (const term of doc) frequency.set(term, (frequency.get(term) ?? 0) + 1);
+    const score = terms.reduce((sum, term) => {
+      const tf = frequency.get(term) ?? 0;
+      if (!tf) return sum;
+      const df = documentFrequency.get(term) ?? 0;
+      const idf = Math.log(1 + (docs.length - df + 0.5) / (df + 0.5));
+      return sum + idf * tf * 2 / (tf + 1.5 * (0.25 + 0.75 * doc.length / Math.max(averageLength, 1)));
+    }, 0);
+    return { chunk, score };
+  })).map((x) => x.chunk).slice(0, limit);
+}
+
+export function evaluateEvidence(query: string, chunks: RetrievedChunk[]): EvidenceDecision {
+  const queryTerms = new Set(tokens(query));
+  const coverage = Math.max(0, ...chunks.map((chunk) => overlap(queryTerms, chunk.text) / Math.max(1, queryTerms.size)));
+  const exact = chunks.some((chunk) => comparable(chunk.text).includes(comparable(query)));
+  const strong = chunks.filter((chunk) => chunk.score >= 0.2).length;
+  const status: EvidenceStatus = exact || coverage >= 0.55 || strong >= 2
+    ? 'SUPPORTED'
+    : coverage >= 0.2 && chunks.length
+      ? 'PARTIALLY_SUPPORTED'
+      : coverage > 0 && chunks.length ? 'UNCERTAIN' : 'NOT_SUPPORTED';
+  return { status, coverage, count: chunks.length, sources: new Set(chunks.map((chunk) => chunk.source)).size, sufficient: status === 'SUPPORTED' || status === 'PARTIALLY_SUPPORTED' };
+}
+
+function profile(chunks: RetrievedChunk[]) {
+  const frequencies = new Map<string, number>();
+  for (const chunk of chunks) for (const term of tokens(chunk.text).filter((term) => term.length > 2)) frequencies.set(term, (frequencies.get(term) ?? 0) + 1);
+  return { documents: new Set(chunks.map((chunk) => chunk.source)).size, chunks: chunks.length, vocabulary: frequencies.size, topTerms: [...frequencies.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 50).map(([term]) => term) };
+}
+
+function rrf(rankings: RetrievedChunk[][], limit = MAX_CANDIDATES) {
+  const scores = new Map<string, number>();
+  const found = new Map<string, RetrievedChunk>();
+  for (const ranking of rankings) ranking.forEach((chunk, rank) => {
+    found.set(chunk.id, chunk);
+    scores.set(chunk.id, (scores.get(chunk.id) ?? 0) + 1 / (60 + rank + 1));
   });
-  const lexicalRank = [...ranked].sort((a, b) => b.lexical - a.lexical || b.x.score - a.x.score);
-  const bmRank = [...ranked].sort((a, b) => b.bm - a.bm || b.x.score - a.x.score);
-  const vectorRank = [...ranked].sort((a, b) => b.x.score - a.x.score);
-  const combined = ranked.map((r) => ({
-    ...r,
-    fused: rrf(vectorRank.findIndex((x) => x.x.id === r.x.id)) + rrf(lexicalRank.findIndex((x) => x.x.id === r.x.id)) + rrf(bmRank.findIndex((x) => x.x.id === r.x.id)),
-  })).sort((a, b) => (b.fused - a.fused) || (b.exact - a.exact) || (b.lexical - a.lexical) || (b.x.score - a.x.score));
-  const best = combined[0]?.x.score ?? 0;
+  return [...found.values()].map((chunk) => ({ ...chunk, score: scores.get(chunk.id) ?? 0 })).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id)).slice(0, limit);
+}
+
+function rerank(query: string, chunks: RetrievedChunk[], vocabulary: string[]) {
+  const queryTerms = new Set(tokens(query));
+  const topTerms = new Set(vocabulary);
+  const domain = [...queryTerms].filter((term) => topTerms.has(term)).length / Math.max(1, queryTerms.size);
+  return chunks.map((chunk) => {
+    const lexical = overlap(queryTerms, chunk.text) / Math.max(1, queryTerms.size);
+    const phrase = Number(comparable(chunk.text).includes(comparable(query)));
+    return { ...chunk, score: 0.65 * lexical + 0.25 * phrase + 0.1 * domain };
+  }).sort((a, b) => b.score - a.score || a.id.localeCompare(b.id));
+}
+
+function expandedQuery(query: string, chunks: RetrievedChunk[]) {
+  const existing = new Set(tokens(query));
+  const frequency = new Map<string, number>();
+  for (const chunk of chunks) for (const term of tokens(chunk.text)) if (!existing.has(term) && term.length > 2) frequency.set(term, (frequency.get(term) ?? 0) + 1);
+  const additions = [...frequency.entries()].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).slice(0, 5).map(([term]) => term);
+  return additions.length ? `${query} ${additions.join(' ')}` : query;
+}
+
+function deduplicate(chunks: RetrievedChunk[]) {
+  const text = new Set<string>();
+  return chunks.filter((chunk) => {
+    const key = comparable(chunk.text);
+    if (!key || text.has(key)) return false;
+    text.add(key);
+    return true;
+  });
+}
+
+function selectContext(chunks: RetrievedChunk[]) {
   const selected: RetrievedChunk[] = [];
-  const seen = new Set<string>();
-  let chars = 0;
-  for (const item of combined) {
-    const focused = answerFragment(item.text, query);
-    const key = focused.toLocaleLowerCase().replace(/\s+/g, ' ').trim();
-    // A high vector score is sufficient for a semantic paraphrase even when
-    // its vocabulary differs; weaker candidates must also have lexical/BM25
-    // support so tenant-wide neighbors cannot enter the prompt.
-    const relevant = item.exact > 0 || item.lexical >= (q.length <= 2 ? 0.5 : 0.2) || item.bm > 0 || (selected.length === 0 && item.x.score >= 0.78);
-    const close = item.x.score >= best - 0.14;
-    if (!relevant) continue;
-    if (!close) continue;
-    if (seen.has(key)) continue;
-    if (selected.length >= 3) continue;
-    const remaining = maxChars - chars;
-    if (remaining <= 80) break;
-    const text = focused.length > remaining ? focused.slice(0, remaining).replace(/\s+\S*$/, '').trim() : focused;
-    if (!text) continue;
-    selected.push({ ...item.x, text });
-    seen.add(key); chars += text.length;
+  let used = 0;
+  for (const chunk of deduplicate(chunks)) {
+    const labelLength = `[Source ${selected.length + 1}: ${chunk.source} | chunk ${chunk.id}]\n`.length;
+    if (used + labelLength + chunk.text.length > CONTEXT_CHARS) break;
+    selected.push(chunk);
+    used += labelLength + chunk.text.length + 2;
   }
-  const chosen = new Set(selected.map((x) => x.id));
-  const rejected = clean.filter((x) => !chosen.has(x.id)).map((x) => {
-    const item = combined.find((r) => r.x.id === x.id)!;
-    const reason = !item ? 'invalid-empty-candidate' : item.x.score < best - 0.14 ? 'outside-score-band' : item.lexical === 0 && item.bm === 0 && item.exact === 0 ? 'no-question-term-or-phrase-match' : selected.length >= 3 ? 'evidence-cap' : 'duplicate-or-context-budget';
-    return { id: x.id, score: Number(x.score.toFixed(4)), reason };
-  });
-  trace?.({
-    query: safeTrace(query),
-    candidateCount: clean.length,
-    bestVectorScore: Number(best.toFixed(6)),
-    maxChars,
-    ranks: combined.map((item) => ({
-      id: item.x.id,
-      source: safeTrace(item.x.source, 240),
-      excerpt: safeTrace(item.text, 700),
-      vectorScore: Number(item.x.score.toFixed(6)),
-      lexicalScore: Number(item.lexical.toFixed(6)),
-      bm25Score: Number(item.bm.toFixed(6)),
-      exactPhrase: item.exact > 0,
-      vectorRank: vectorRank.findIndex((x) => x.x.id === item.x.id) + 1,
-      lexicalRank: lexicalRank.findIndex((x) => x.x.id === item.x.id) + 1,
-      bm25Rank: bmRank.findIndex((x) => x.x.id === item.x.id) + 1,
-      fusedScore: Number(item.fused.toFixed(8)),
-      fusedRank: combined.findIndex((x) => x.x.id === item.x.id) + 1,
-      focusedExcerpt: safeTrace(answerFragment(item.text, query), 700),
-      selected: chosen.has(item.x.id),
-      rejection: rejected.find((x) => x.id === item.x.id)?.reason ?? null,
-    })),
-    selected: selected.map((x) => ({ id: x.id, source: safeTrace(x.source, 240), chars: x.text.length, excerpt: safeTrace(x.text, 1200) })),
-  });
-  return { evidence: selected, rejected };
+  return selected;
+}
+
+export async function retrieveAdvancedEvidence(input: { question: string; corpus: RetrievedChunk[]; dense: RetrievedChunk[] }): Promise<AdvancedRetrieval> {
+  const corpus = deduplicate(input.corpus);
+  const run = (query: string, dense: RetrievedChunk[]) => {
+    const exact = exactSearch(query, corpus);
+    const keyword = keywordSearch(query, corpus);
+    const bm25 = bm25Search(query, corpus);
+    const fused = rrf([exact, keyword, bm25, dense.slice(0, RETRIEVAL_K)]);
+    return { exact, keyword, bm25, fused, ranked: rerank(input.question, fused, profile(corpus).topTerms).slice(0, FINAL_K) };
+  };
+  const first = run(input.question, input.dense);
+  let selected = selectContext(first.ranked);
+  let decision = evaluateEvidence(input.question, selected);
+  let expanded = false;
+  let candidateCounts = { exact: first.exact.length, keyword: first.keyword.length, bm25: first.bm25.length, dense: input.dense.length, fused: first.fused.length };
+  if ((decision.status === 'UNCERTAIN' || decision.status === 'NOT_SUPPORTED') && corpus.length) {
+    expanded = true;
+    const query = expandedQuery(input.question, corpus);
+    const second = run(query, []);
+    selected = selectContext(rerank(input.question, rrf([first.fused, second.keyword, second.bm25]), profile(corpus).topTerms).slice(0, FINAL_K));
+    decision = evaluateEvidence(input.question, selected);
+    candidateCounts = { exact: first.exact.length + second.exact.length, keyword: first.keyword.length + second.keyword.length, bm25: first.bm25.length + second.bm25.length, dense: input.dense.length, fused: Math.min(MAX_CANDIDATES, first.fused.length + second.fused.length) };
+  }
+  const rejected = selected.filter((chunk) => chunk.score < 0.2).map((chunk) => ({ id: chunk.id, reason: 'low deterministic rerank score' }));
+  return { evidence: selected, decision, diagnostics: { query: input.question, expanded, profile: profile(corpus), candidateCounts, evidence: decision, rejected } };
+}
+
+/** Source-labelled, bounded whole-chunk context from the standalone baseline. */
+export function buildEvidenceContext(chunks: RetrievedChunk[]) {
+  return chunks.map((chunk, index) => `[Source ${index + 1}: ${chunk.source} | chunk ${chunk.id}]\n${chunk.text}`).join('\n\n');
 }
 
 export function cleanAnswerScaffolding(answer: string) {
-  const text = answer.replace(/\\n/g, ' ').replace(/```[a-z]*\s*/gi, '').replace(/```/g, '')
-    .replace(/(^|\s)#{1,6}\s*/g, '$1')
-    .replace(/\*{1,3}([^*]+)\*{1,3}/g, '$1')
-    .replace(/(?:^|\s)Q:\s*.*?\s+A:\s*/gis, ' ')
-    .replace(/(^|\s)[QA]:\s*/gi, '$1')
-    .replace(/\b(?:FAQ|CONVERSATION|ESCALATION\s*\/\s*HUMAN CONTACT|POLICIES)\b\s*:?[\s-]*/gi, ' ')
-    .replace(/\s+/g, ' ').trim();
+  const cleaned = answer.replace(/^\s*(?:#{1,6}\s*)?(?:faq|answer)\s*:?\s*/i, '').replace(/(?:^|\n)\s*[QA]:\s*/gi, ' ').replace(/\s+/g, ' ').trim();
+  const sentences = cleaned.match(/[^.!?]+[.!?]+|[^.!?]+$/g) ?? [];
   const seen = new Set<string>();
-  return text.split(/(?<=[.!?])\s+/).filter((s) => { const k = s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, ' ').trim(); if (!k || seen.has(k)) return false; seen.add(k); return true; }).join(' ').trim();
+  return sentences.filter((sentence) => { const key = comparable(sentence); if (!key || seen.has(key)) return false; seen.add(key); return true; }).join(' ').trim();
+}
+
+// Compatibility alias retained for existing focused unit consumers. The active path uses retrieveAdvancedEvidence.
+export function selectFocusedEvidence(candidates: RetrievedChunk[], question: string, maxChars = CONTEXT_CHARS) {
+  const ranked = rerank(question, rrf([exactSearch(question, candidates), keywordSearch(question, candidates), bm25Search(question, candidates), candidates]), profile(candidates).topTerms);
+  const evidence: RetrievedChunk[] = [];
+  let used = 0;
+  for (const chunk of deduplicate(ranked)) {
+    const faq = chunk.text.match(/(?:Q:\s*[^?]+\?\s*)?A:\s*(.*?)(?=\s*Q:|$)/i)?.[1]?.trim();
+    const candidate = faq || chunk.text;
+    if (used + candidate.length > maxChars) continue;
+    evidence.push({ ...chunk, text: candidate });
+    used += candidate.length;
+    if (evidence.length >= 3) break;
+  }
+  return { evidence, rejected: candidates.filter((chunk) => !evidence.some((selected) => selected.id === chunk.id)).map((chunk) => ({ id: chunk.id, reason: 'not selected by bounded evidence selection' })) };
 }

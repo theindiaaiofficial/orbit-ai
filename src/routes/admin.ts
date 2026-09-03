@@ -6,16 +6,7 @@ import { AppError } from '../lib/errors.js';
 import { z } from 'zod';
 import { loadLlmConfig } from '../config/llm.js';
 import { createLlmProvider } from '../providers/llm.js';
-import { groundingCorrection, validateGrounding } from '../services/grounding.js';
 type LeadRow = Record<string, unknown> & { id: string; status: string; conversationId?: string };
-
-function professionalFallback(client: { name: string; config: { companyName?: string; teamEmail?: string } }) {
-  const company = client.config.companyName?.trim() || client.name;
-  const contact = client.config.teamEmail?.trim();
-  return contact
-    ? `I don’t have verified information about that in the information provided by ${company}. For the most accurate answer, please contact ${company} directly at ${contact}.`
-    : `I don’t have verified information about that in the information provided by ${company}. Please contact ${company} directly through its official support channel for the most accurate answer.`;
-}
 
 const idParams = z.object({ id: z.string().uuid() });
 const listQuery = z.object({
@@ -211,49 +202,11 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
         .parse(req.body),
       x = await c.repo.getClient(id);
     if (!x) throw new AppError(404, 'NOT_FOUND', 'Client not found');
-    const [query] = await c.embedding.embed([body.question]);
-    const context = await c.vector.search(
-      id,
-      query!,
-      Math.min(x.config.topK ?? 40, 40),
-      x.config.minSimilarity ?? 0.05,
-    );
-    req.log.info(
-      {
-        clientId: id,
-        retrievedChunks: context.length,
-        scores: context.map((chunk) => chunk.score),
-        sources: context.map((chunk) => chunk.source),
-      },
-      'prompt preview retrieval',
-    );
-    const input = {
-      question: body.question,
-      prompt: body.prompt,
-      context,
-      config: x.config,
-    };
-    let answer = await c.llm.answer(input);
-    const check = validateGrounding(body.question, answer, context);
-    if (!check.ok) answer = await c.llm.answer({ ...input, prompt: `${body.prompt}\n\n${groundingCorrection(check.reasons)}` });
-    const finalCheck = validateGrounding(body.question, answer, context);
-    if (!finalCheck.ok) answer = professionalFallback(x);
-    return {
-      answer,
-      retrieval: {
-        count: context.length,
-        sources: context.map((chunk, index) => ({
-          source: chunk.source,
-          score: Math.round(chunk.score * 1000) / 1000,
-          chunkId: `${index}-${chunk.source}`,
-        })),
-      },
-      sources: context.map((chunk, index) => ({
-        source: chunk.source,
-        score: Math.round(chunk.score * 1000) / 1000,
-        chunkId: `${index}-${chunk.source}`,
-      })),
-    };
+    const preview = await c.chat.preview(id, body.question, body.prompt);
+    const context = preview.retrieval.evidence;
+    req.log.info({ clientId: id, retrievedChunks: context.length, status: preview.retrieval.decision.status, sources: context.map((chunk) => chunk.source) }, 'prompt preview retrieval');
+    const sources = context.map((chunk) => ({ source: chunk.source, score: Math.round(chunk.score * 1000) / 1000, chunkId: chunk.id }));
+    return { answer: preview.answer, retrieval: { count: context.length, sources }, sources };
   });
   app.post('/clients/:id/prompt', async (req) => {
     const { id } = idParams.parse(req.params),
