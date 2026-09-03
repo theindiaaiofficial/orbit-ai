@@ -7,6 +7,8 @@ export interface VectorProvider {
   upsert(clientId: string, rows: VectorRecord[]): Promise<void>;
   replaceSource(clientId: string, source: string, rows: VectorRecord[]): Promise<void>;
   search(clientId: string, v: number[], topK: number, min: number): Promise<RetrievedChunk[]>;
+  /** Bounded tenant-only text corpus used by exact, keyword, and BM25 recall. */
+  listTenant(clientId: string, limit?: number): Promise<RetrievedChunk[]>;
   deleteTenant(clientId: string): Promise<void>;
   health(): Promise<ProviderHealth>;
 }
@@ -42,6 +44,9 @@ export class LocalVector implements VectorProvider {
       .filter((x) => x.score >= min)
       .sort((a, b) => b.score - a.score)
       .slice(0, k);
+  }
+  async listTenant(c: string, limit = 2000) {
+    return this.rows.filter((x) => x.clientId === c).slice(0, Math.max(0, limit)).map((x) => ({ id: x.id, text: x.text, source: x.source, score: 0 }));
   }
   async deleteTenant(c: string) {
     this.rows = this.rows.filter((x) => x.clientId !== c);
@@ -120,6 +125,15 @@ export class QdrantVector implements VectorProvider {
     };
     return j.result.map((x) => ({ id: String(x.id), ...x.payload, score: x.score }));
   }
+  async listTenant(c: string, limit = 2000) {
+    const r = await fetch(`${this.url}/collections/tenant_knowledge/points/scroll`, {
+      method: 'POST', headers: this.headers(),
+      body: JSON.stringify({ limit: Math.min(Math.max(0, limit), 2000), with_payload: true, filter: { must: [{ key: 'clientId', match: { value: c } }] } }),
+    });
+    if (!r.ok) throw new Error(`Qdrant tenant scan failed (${r.status})`);
+    const j = await r.json() as { result?: { points?: { id: string | number; payload?: { text?: string; source?: string } }[] } };
+    return (j.result?.points ?? []).map((x) => ({ id: String(x.id), text: String(x.payload?.text ?? ''), source: String(x.payload?.source ?? ''), score: 0 }));
+  }
   async deleteTenant(c: string) {
     await fetch(`${this.url}/collections/tenant_knowledge/points/delete?wait=true`, {
       method: 'POST',
@@ -195,6 +209,16 @@ export class SupabaseVector implements VectorProvider {
       source: String(x.source),
       score: Number(x.similarity ?? x.score),
     }));
+  }
+  async listTenant(clientId: string, limit = 2000) {
+    const { data, error } = await this.client
+      .from('knowledge_vectors')
+      .select('id,content,source')
+      .eq('client_id', clientId)
+      .order('created_at', { ascending: true })
+      .limit(Math.min(Math.max(0, limit), 2000));
+    if (error) throw new Error(`pgvector tenant scan failed: ${error.message}`);
+    return (data ?? []).map((x: any) => ({ id: String(x.id), text: String(x.content), source: String(x.source), score: 0 }));
   }
   async deleteTenant(clientId: string) {
     const { error } = await this.client
