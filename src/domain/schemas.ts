@@ -93,9 +93,14 @@ export const chatSchema = z
 export const leadSchema = z
   .object({
     conversationId: z.string().uuid().optional(),
-    name: z.string().min(1).max(120),
-    email: z.string().email().optional(),
-    phone: z.string().max(40).optional(),
-    requirement: z.string().max(2000).optional(),
+    name: z.string().trim().min(1).max(120),
+    email: z.string().trim().email().optional(),
+    phone: z.string().trim().max(40).optional(),
+    requirement: z.string().trim().max(2000).optional(),
+    message: z.string().trim().max(2000).optional(),
   })
-  .strict();
+  .strict()
+  .refine((value) => Boolean(value.requirement || value.message), {
+    message: 'Message is required',
+    path: ['message'],
+  });

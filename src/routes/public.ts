@@ -51,10 +51,36 @@ export async function publicRoutes(app: FastifyInstance, c: Context) {
     } finally { reply.raw.end(); }
   });
   app.post('/leads', async (req) => {
-    const b = leadSchema.parse(req.body); const tid = (req as TenantRequest).tenantId; const { conversationId, ...data } = b;
-    if (conversationId && !(await c.repo.conversationForClient(tid, conversationId))) throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversation not found');
-    const id = await c.repo.saveLead(tid, conversationId, data as Record<string, string>); const client = (await c.repo.getClient(tid))!;
-    await c.notification.notify(client.config.notificationEmail ?? client.config.teamEmail, `New lead for ${client.name}`, { id, ...data }, tid);
-    await c.repo.audit(tid, 'lead.created', { leadId: id }); return { id, status: 'accepted' };
+    const b = leadSchema.parse(req.body);
+    const tid = (req as TenantRequest).tenantId;
+    const client = await c.repo.getClient(tid);
+    if (!client?.enabled) throw new AppError(403, 'TENANT_DISABLED', 'Tenant is disabled');
+    const { conversationId, ...rawData } = b;
+    const data = Object.fromEntries(
+      Object.entries(rawData).filter(([, value]) => value !== undefined),
+    ) as Record<string, string>;
+    for (const value of Object.values(data)) {
+      if (/\r|\n/.test(value)) throw new AppError(400, 'INVALID_LEAD', 'Lead fields contain invalid characters');
+    }
+    if (conversationId && !(await c.repo.conversationForClient(tid, conversationId)))
+      throw new AppError(404, 'CONVERSATION_NOT_FOUND', 'Conversation not found');
+    const destination = client.config.notificationEmail ?? client.config.teamEmail;
+    if (!destination) throw new AppError(503, 'LEAD_DELIVERY_UNAVAILABLE', 'Lead delivery is not configured');
+    const id = await c.repo.saveLead(tid, conversationId, data);
+    try {
+      await c.notification.notify(destination, `New lead for ${client.name}`, {
+        id,
+        client: client.name,
+        receivedAt: new Date().toISOString(),
+        name: data.name,
+        email: data.email,
+        message: data.message ?? data.requirement,
+        phone: data.phone,
+      }, tid, { replyTo: data.email });
+    } catch {
+      throw new AppError(503, 'LEAD_DELIVERY_FAILED', 'Unable to send your message. Please try again.');
+    }
+    await c.repo.audit(tid, 'lead.created', { leadId: id });
+    return { id, status: 'accepted' };
   });
 }

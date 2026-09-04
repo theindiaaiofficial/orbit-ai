@@ -6,17 +6,23 @@ import crypto from 'node:crypto';
 import type { ProviderHealth } from '../domain/types.js';
 export interface NotificationProvider {
   readonly name: string;
-  notify(to: string | undefined, subject: string, data: unknown, clientId?: string): Promise<void>;
+  notify(
+    to: string | undefined,
+    subject: string,
+    data: unknown,
+    clientId?: string,
+    options?: { replyTo?: string },
+  ): Promise<void>;
   health(): Promise<ProviderHealth>;
 }
 export class OutboxNotification implements NotificationProvider {
   name = 'file-outbox';
   constructor(private dir: string) {}
-  async notify(to: string | undefined, subject: string, data: unknown, _clientId?: string) {
+  async notify(to: string | undefined, subject: string, data: unknown, _clientId?: string, options?: { replyTo?: string }) {
     await fs.mkdir(this.dir, { recursive: true });
     await fs.writeFile(
       path.join(this.dir, `${Date.now()}-${crypto.randomUUID()}.json`),
-      JSON.stringify({ to: to ?? null, subject, data, createdAt: new Date().toISOString() }),
+      JSON.stringify({ to: to ?? null, subject, data, replyTo: options?.replyTo ?? null, createdAt: new Date().toISOString() }),
     );
   }
   async health() {
@@ -42,9 +48,9 @@ export class SmtpNotification implements NotificationProvider {
     this.from = options.from;
   }
   private from?: string;
-  async notify(to: string | undefined, subject: string, data: unknown, _clientId?: string) {
+  async notify(to: string | undefined, subject: string, data: unknown, _clientId?: string, options?: { replyTo?: string }) {
     if (!to) throw new Error('Notification email is not configured');
-    await this.tx.sendMail({ from: this.from, to, subject, text: JSON.stringify(data, null, 2) });
+    await this.tx.sendMail({ from: this.from, to, replyTo: options?.replyTo, subject, text: JSON.stringify(data, null, 2) });
   }
   async health() {
     try {
@@ -73,13 +79,13 @@ export class SupabaseOutboxNotification implements NotificationProvider {
           })
         : urlOrClient;
   }
-  async notify(to: string | undefined, subject: string, data: unknown, clientId?: string) {
+  async notify(to: string | undefined, subject: string, data: unknown, clientId?: string, options?: { replyTo?: string }) {
     const { error } = await this.client.from(this.table).insert({
       id: crypto.randomUUID(),
       client_id: clientId ?? null,
       recipient: to ?? null,
       subject,
-      payload: data,
+      payload: { ...(data as Record<string, unknown>), replyTo: options?.replyTo ?? null },
       status: 'pending',
       attempts: 0,
       created_at: new Date().toISOString(),
