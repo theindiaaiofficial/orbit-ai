@@ -40,8 +40,8 @@ export function validateGrounding(question: string, answer: string, evidence: Re
   const sourceNumbers = numberTokens(source);
   const unsupported = answerNumbers.filter((claim) => !sourceNumbers.some((supported) =>
     supported.value === claim.value &&
-    (!claim.currency || supported.currency === claim.currency) &&
-    (!claim.qualifier || supported.qualifier === claim.qualifier),
+    (!claim.currency || !supported.currency || supported.currency === claim.currency) &&
+    (!claim.qualifier || !supported.qualifier || supported.qualifier === claim.qualifier),
   ));
   if (unsupported.length) reasons.push('unsupported numeric claim');
 
