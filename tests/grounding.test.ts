@@ -13,4 +13,14 @@ describe('bounded grounding validation', () => {
   it('rejects an absolute answer that drops a qualification', () => {
     expect(validateGrounding('Are all gyms open 24/7?', 'All gyms are open 24/7.', chunk('Most gyms are open 24/7, but some have different hours.')).ok).toBe(false);
   });
+
+  it('accepts practical paraphrases of explicitly supported Gousto facts', () => {
+    expect(validateGrounding('What is Gousto’s delivery fee?', 'Gousto delivery costs 3.99.', chunk('Delivery is publicly listed as £3.99.')).ok).toBe(true);
+    expect(validateGrounding('How many people can a Gousto recipe box serve?', 'A Gousto box serves one to five people.', chunk('Gousto boxes are designed for 1 to 5 people.')).ok).toBe(true);
+    expect(validateGrounding('How many recipes does Gousto offer each week?', 'You can choose from over 175 recipes each week.', chunk('Customers can choose from over 175 recipes each week.')).ok).toBe(true);
+  });
+
+  it('still rejects a different currency for a supported pound amount', () => {
+    expect(validateGrounding('What is Gousto’s delivery fee?', 'The delivery fee is $3.99.', chunk('Delivery is publicly listed as £3.99.')).ok).toBe(false);
+  });
 });

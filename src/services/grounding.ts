@@ -2,9 +2,22 @@ import type { RetrievedChunk } from '../domain/types.js';
 
 export type GroundingCheck = { ok: boolean; reasons: string[] };
 
-const numberTokens = (text: string) =>
-  (text.match(/(?:£|AUD\s*\$|\$|€|\b)\d+(?:[.,]\d+)?(?:\s*%|\s*(?:per|a)\s*(?:month|year|day|week))?/gi) ?? [])
-    .map((x) => x.toLowerCase().replace(/\s+/g, '').replace(/,/g, ''));
+type NumericClaim = { key: string; value: string; currency: string; qualifier: string };
+
+/**
+ * Normalize numeric claims for practical grounding. Currency is retained so a
+ * supported pound amount cannot silently become an unsupported dollar amount;
+ * omitted currency and harmless spacing/unit wording remain compatible.
+ */
+const numberTokens = (text: string): NumericClaim[] =>
+  [...text.matchAll(/(£|AUD\s*\$|\$|€)?\s*(\d+(?:[.,]\d+)?)(?:\s*%|\s*(?:per|a)\s*(?:month|year|day|week))?/gi)]
+    .map((match) => {
+      const raw = match[0].toLowerCase();
+      const currency = (match[1] ?? '').replace(/\s+/g, '').toLowerCase();
+      const value = match[2]!.replace(/,/g, '');
+      const qualifier = /%/.test(raw) ? '%' : /\b(?:per|a)\s*(month|year|day|week)\b/i.exec(raw)?.[1]?.toLowerCase() ?? '';
+      return { key: `${currency}:${value}:${qualifier}`, value, currency, qualifier };
+    });
 
 const words = (text: string) =>
   new Set((text.toLowerCase().match(/[\p{L}\p{N}]{3,}/gu) ?? []).filter((x) => !['what', 'does', 'have', 'with', 'from', 'that', 'this', 'about', 'are', 'the'].includes(x)));
@@ -24,8 +37,12 @@ export function validateGrounding(question: string, answer: string, evidence: Re
   const source = evidence.map((x) => x.text).join('\n');
   const reasons: string[] = [];
   const answerNumbers = numberTokens(answer);
-  const sourceNumbers = new Set(numberTokens(source));
-  const unsupported = answerNumbers.filter((x) => !sourceNumbers.has(x));
+  const sourceNumbers = numberTokens(source);
+  const unsupported = answerNumbers.filter((claim) => !sourceNumbers.some((supported) =>
+    supported.value === claim.value &&
+    (!claim.currency || supported.currency === claim.currency) &&
+    (!claim.qualifier || supported.qualifier === claim.qualifier),
+  ));
   if (unsupported.length) reasons.push('unsupported numeric claim');
 
   const qWords = words(question);
