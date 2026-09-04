@@ -17,6 +17,7 @@ type ChatResult = {
 };
 
 type Prepared = {
+  requestId: string;
   client: Client;
   sid: string;
   conversationId: string;
@@ -31,6 +32,12 @@ type Prepared = {
 const summaryRequest = (message: string) => /\b(summarize|summary|recap|what did we discuss|what you just said)\b/i.test(message);
 const clearlyGeneral = (message: string) => /^(hi|hello|hey|thanks|thank you|okay|ok|good morning|good afternoon|good evening|how are you|tell me a joke|what is the meaning of life)[!.? ]*$/i.test(message.trim());
 const answerTokens = (answer: string) => answer.match(/\S+\s*/g) ?? [];
+const redact = (value: string, limit = 1200) => value
+  .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\\.[A-Z]{2,}/gi, '[REDACTED_EMAIL]')
+  .replace(/(?:\\+?\\d[\\d ()-]{7,}\\d)/g, '[REDACTED_PHONE]')
+  .slice(0, limit);
+const trace = (requestId: string, event: string, data: Record<string, unknown>) =>
+  console.log(JSON.stringify({ groundingTrace: true, requestId, event, ...data }));
 
 /** Tenant-scoped orchestration. Retrieval is always attempted for the current question; history is summary-only. */
 export class ChatService {
@@ -67,20 +74,21 @@ export class ChatService {
   private async answerWithGrounding(prepared: Prepared, question: string, prompt = prepared.client.prompt) {
     const first = cleanAnswerScaffolding(await this.llm.answer(this.input(prepared, question, prompt)));
     const firstCheck = validateGrounding(question, first, prepared.found);
+    trace(prepared.requestId, 'GROUNDING_FIRST', { rawAnswer: redact(first), validation: firstCheck, evidenceCount: prepared.found.length });
     if (firstCheck.ok) return first;
 
     const corrected = cleanAnswerScaffolding(await this.llm.answer(
       this.input(prepared, question, `${prompt}\n${groundingCorrection(firstCheck.reasons)}`),
     ));
-    return validateGrounding(question, corrected, prepared.found).ok
-      ? corrected
-      : prepared.client.config.fallbackMessage;
+    const correctedCheck = validateGrounding(question, corrected, prepared.found);
+    trace(prepared.requestId, 'GROUNDING_CORRECTION', { reasons: firstCheck.reasons, correctedAnswer: redact(corrected), validation: correctedCheck, final: correctedCheck.ok ? 'corrected-answer' : 'fallback', fallbackMessage: prepared.client.config.fallbackMessage });
+    return correctedCheck.ok ? corrected : prepared.client.config.fallbackMessage;
   }
 
   async preview(clientId: string, message: string, prompt: string) {
     const retrieval = await this.retrieve(clientId, message);
     const prepared = {
-      client: retrieval.client, sid: '', conversationId: '', history: [], found: retrieval.evidence,
+      requestId: crypto.randomUUID(), client: retrieval.client, sid: '', conversationId: '', history: [], found: retrieval.evidence,
       decision: retrieval.decision, diagnostics: retrieval.diagnostics, started: Date.now(), summary: false,
     } satisfies Prepared;
     const answer = retrieval.decision.sufficient || clearlyGeneral(message)
@@ -93,6 +101,8 @@ export class ChatService {
     const client = await this.repo.getClient(clientId);
     if (!client?.enabled) throw new AppError(403, 'TENANT_DISABLED', 'Tenant is disabled');
     const sid = sessionId ?? crypto.randomUUID();
+    const requestId = crypto.randomUUID();
+    trace(requestId, 'REQUEST', { tenantId: client.id, knowledgeBaseId: client.id, question: redact(message, 500) });
     const conversationId = await this.repo.createConversation(clientId, sid);
     const prior = await this.repo.messages(conversationId);
     await this.repo.addMessage(conversationId, 'user', message);
@@ -100,10 +110,18 @@ export class ChatService {
     const started = Date.now();
     if (summaryRequest(message)) {
       const empty: EvidenceDecision = { status: 'NOT_SUPPORTED', coverage: 0, count: 0, sources: 0, sufficient: false };
-      return { client, sid, conversationId, history, found: [], decision: empty, diagnostics: { query: message, expanded: false, profile: { documents: 0, chunks: 0, vocabulary: 0, topTerms: [] }, candidateCounts: { exact: 0, keyword: 0, bm25: 0, dense: 0, fused: 0 }, evidence: empty, rejected: [] }, started, summary: true };
+      const prepared = { requestId, client, sid, conversationId, history, found: [], decision: empty, diagnostics: { query: message, expanded: false, profile: { documents: 0, chunks: 0, vocabulary: 0, topTerms: [] }, candidateCounts: { exact: 0, keyword: 0, bm25: 0, dense: 0, fused: 0 }, evidence: empty, rejected: [] }, started, summary: true } satisfies Prepared;
+      trace(requestId, 'RETRIEVAL', { tenantId: client.id, retrievedChunks: 0, decision: empty, fallbackBranch: 'summary' });
+      return prepared;
     }
     const retrieval = await this.retrieve(clientId, message);
-    return { client, sid, conversationId, history, found: retrieval.evidence, decision: retrieval.decision, diagnostics: retrieval.diagnostics, started, summary: false };
+    trace(requestId, 'RETRIEVAL', {
+      tenantId: client.id, knowledgeBaseId: client.id, query: redact(retrieval.diagnostics.query, 500),
+      retrievedChunks: retrieval.evidence.length,
+      chunks: retrieval.evidence.map((x) => ({ id: x.id, source: x.source, score: x.score, text: redact(x.text) })),
+      decision: retrieval.decision, diagnostics: retrieval.diagnostics,
+    });
+    return { requestId, client, sid, conversationId, history, found: retrieval.evidence, decision: retrieval.decision, diagnostics: retrieval.diagnostics, started, summary: false };
   }
 
   private input(prepared: Prepared, question: string, prompt = prepared.client.prompt) {
@@ -136,19 +154,21 @@ export class ChatService {
 
   async chat(clientId: string, message: string, sessionId?: string): Promise<ChatResult> {
     const prepared = await this.prepare(clientId, message, sessionId);
-    if (prepared.summary) return this.finalize(prepared, prepared.client.config.fallbackMessage);
-    if (!prepared.decision.sufficient && !clearlyGeneral(message)) return this.finalize(prepared, prepared.client.config.fallbackMessage);
+    if (prepared.summary) { trace(prepared.requestId, 'FALLBACK', { reason: 'summary-request', answer: prepared.client.config.fallbackMessage }); return this.finalize(prepared, prepared.client.config.fallbackMessage); }
+    if (!prepared.decision.sufficient && !clearlyGeneral(message)) { trace(prepared.requestId, 'FALLBACK', { reason: 'evidence-insufficient-before-llm', decision: prepared.decision, answer: prepared.client.config.fallbackMessage }); return this.finalize(prepared, prepared.client.config.fallbackMessage); }
     return this.finalize(prepared, await this.answerWithGrounding(prepared, message));
   }
 
   async stream(clientId: string, message: string, sessionId: string | undefined, onToken: (token: string) => void): Promise<ChatResult> {
     const prepared = await this.prepare(clientId, message, sessionId);
     if (prepared.summary) {
+      trace(prepared.requestId, 'FALLBACK', { reason: 'summary-request', answer: prepared.client.config.fallbackMessage });
       const fallback = prepared.client.config.fallbackMessage;
       for (const token of answerTokens(fallback)) onToken(token);
       return this.finalize(prepared, fallback);
     }
     if (!prepared.decision.sufficient && !clearlyGeneral(message)) {
+      trace(prepared.requestId, 'FALLBACK', { reason: 'evidence-insufficient-before-llm', decision: prepared.decision, answer: prepared.client.config.fallbackMessage });
       const fallback = prepared.client.config.fallbackMessage;
       for (const token of answerTokens(fallback)) onToken(token);
       return this.finalize(prepared, fallback);
@@ -159,12 +179,16 @@ export class ChatService {
     await this.llm.streamAnswer(this.input(prepared, message), (token) => { streamed += token; });
     let answer = cleanAnswerScaffolding(streamed);
     const check = validateGrounding(message, answer, prepared.found);
+    trace(prepared.requestId, 'GROUNDING_FIRST', { rawAnswer: redact(answer), validation: check, evidenceCount: prepared.found.length, mode: 'stream-buffered' });
     if (!check.ok) {
       answer = cleanAnswerScaffolding(await this.llm.answer(
         this.input(prepared, message, `${prepared.client.prompt}\n${groundingCorrection(check.reasons)}`),
       ));
-      if (!validateGrounding(message, answer, prepared.found).ok) answer = prepared.client.config.fallbackMessage;
+      const correctedCheck = validateGrounding(message, answer, prepared.found);
+      trace(prepared.requestId, 'GROUNDING_CORRECTION', { reasons: check.reasons, correctedAnswer: redact(answer), validation: correctedCheck, final: correctedCheck.ok ? 'corrected-answer' : 'fallback', fallbackMessage: prepared.client.config.fallbackMessage, mode: 'stream-buffered' });
+      if (!correctedCheck.ok) answer = prepared.client.config.fallbackMessage;
     }
+    if (answer === prepared.client.config.fallbackMessage && check.ok) trace(prepared.requestId, 'FALLBACK', { reason: 'provider-returned-configured-fallback', answer });
     for (const token of answerTokens(answer)) onToken(token);
     return this.finalize(prepared, answer);
   }
