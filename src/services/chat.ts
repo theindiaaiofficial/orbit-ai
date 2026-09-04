@@ -147,9 +147,22 @@ export class ChatService {
 
   private async finalize(prepared: Prepared, answer: string) {
     const cleaned = cleanAnswerScaffolding(answer);
-    await this.repo.addMessage(prepared.conversationId, 'assistant', cleaned);
-    await this.repo.usage(prepared.client.id, 'chat', cleaned.length, Date.now() - prepared.started);
-    return this.result(prepared.client, prepared.sid, prepared.conversationId, cleaned, prepared.found);
+    trace(prepared.requestId, 'FINALIZE_START', { answerChars: cleaned.length, conversationId: prepared.conversationId });
+    try {
+      trace(prepared.requestId, 'PERSIST_MESSAGE_START', { conversationId: prepared.conversationId });
+      await this.repo.addMessage(prepared.conversationId, 'assistant', cleaned);
+      trace(prepared.requestId, 'PERSIST_MESSAGE_DONE', { conversationId: prepared.conversationId });
+      trace(prepared.requestId, 'PERSIST_USAGE_START', { tenantId: prepared.client.id, answerChars: cleaned.length });
+      await this.repo.usage(prepared.client.id, 'chat', cleaned.length, Date.now() - prepared.started);
+      trace(prepared.requestId, 'PERSIST_USAGE_DONE', { tenantId: prepared.client.id });
+      const result = this.result(prepared.client, prepared.sid, prepared.conversationId, cleaned, prepared.found);
+      trace(prepared.requestId, 'FINALIZE_DONE', { answerChars: cleaned.length });
+      return result;
+    } catch (error) {
+      const detail = error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { name: typeof error, message: String(error), stack: undefined };
+      trace(prepared.requestId, 'POST_GROUNDING_EXCEPTION', { function: 'ChatService.finalize', ...detail });
+      throw error;
+    }
   }
 
   async chat(clientId: string, message: string, sessionId?: string): Promise<ChatResult> {
@@ -189,7 +202,11 @@ export class ChatService {
       if (!correctedCheck.ok) answer = prepared.client.config.fallbackMessage;
     }
     if (answer === prepared.client.config.fallbackMessage && check.ok) trace(prepared.requestId, 'FALLBACK', { reason: 'provider-returned-configured-fallback', answer });
-    for (const token of answerTokens(answer)) onToken(token);
+    const outputTokens = answerTokens(answer);
+    trace(prepared.requestId, 'STREAM_DELIVERY_START', { tokenCount: outputTokens.length, answerChars: answer.length });
+    for (const token of outputTokens) onToken(token);
+    trace(prepared.requestId, 'STREAM_DELIVERY_DONE', { tokenCount: outputTokens.length });
+    trace(prepared.requestId, 'FINALIZE_CALL', { branch: 'stream-success' });
     return this.finalize(prepared, answer);
   }
 }
