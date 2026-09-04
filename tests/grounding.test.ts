@@ -20,6 +20,14 @@ describe('bounded grounding validation', () => {
     expect(validateGrounding('How many recipes does Gousto offer each week?', 'You can choose from over 175 recipes each week.', chunk('Customers can choose from over 175 recipes each week.')).ok).toBe(true);
   });
 
+  it('does not let an unrelated tenant UNKNOWN line reject supported capacity', () => {
+    expect(validateGrounding(
+      'How many people can a Gousto recipe box serve?',
+      'A Gousto recipe box can serve anywhere from 1 to 5 people.',
+      chunk('Gousto offers boxes for 1 to 5 people. Does Gousto provide emergency delivery? A: UNKNOWN.'),
+    ).ok).toBe(true);
+  });
+
   it('still rejects a different currency for a supported pound amount', () => {
     expect(validateGrounding('What is Gousto’s delivery fee?', 'The delivery fee is $3.99.', chunk('Delivery is publicly listed as £3.99.')).ok).toBe(false);
   });

@@ -46,8 +46,13 @@ export function validateGrounding(question: string, answer: string, evidence: Re
   if (unsupported.length) reasons.push('unsupported numeric claim');
 
   const qWords = words(question);
+  // A tenant/company name alone is not evidence that an UNKNOWN statement is
+  // about the requested fact. Require two topical terms, excluding the
+  // repeated brand token, to avoid unrelated UNKNOWN entries poisoning valid
+  // answers from the same tenant document.
+  const topicalQuestionWords = new Set([...qWords].filter((word) => !/^gousto$/i.test(word)));
   const unknownLines = source.split(/(?<=[.!?])\s+|\n/).filter((x) => /\bunknown\b|not available|not specified|cannot be verified/i.test(x));
-  if (unknownLines.some((line) => overlap(qWords, words(line)) >= 1) && answerNumbers.length && !/\b(unknown|not available|not specified|cannot verify|check the official|support)\b/i.test(answer)) {
+  if (unknownLines.some((line) => overlap(topicalQuestionWords, words(line)) >= 2) && answerNumbers.length && !/\b(unknown|not available|not specified|cannot verify|check the official|support)\b/i.test(answer)) {
     reasons.push('answer supplies a value where relevant evidence is unknown');
   }
 
