@@ -16,7 +16,11 @@ describe('chat widget lifetime and sharing contract', () => {
   it('provides safe per-message and complete-conversation sharing plus feedback actions', () => {
     expect(widget).toContain('Share response');
     expect(widget).toContain('Share conversation');
-    expect(widget).toContain("title:'Orbit AI Conversation'");
+    expect(widget).toContain("`${clientName} Conversation`");
+    expect(widget).not.toContain('Orbit AI Conversation');
+    expect(widget).toContain('<svg viewBox=');
+    expect(widget).toContain('aria-label="Send message"');
+    expect(widget).toContain('const clientName = config.clientName || name;');
     expect(widget).toContain('Copy response');
     expect(widget).toContain('Mark response helpful');
     expect(widget).toContain('Mark response not helpful');

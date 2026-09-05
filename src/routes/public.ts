@@ -18,7 +18,7 @@ export async function publicRoutes(app: FastifyInstance, c: Context) {
   app.get('/config', async (req) => {
     const x = await c.repo.getClient((req as TenantRequest).tenantId);
     if (!x) throw new AppError(404, 'NOT_FOUND', 'Client not found');
-    return { assistantName: x.config.assistantName, welcomeMessage: x.config.welcomeMessage, widget: x.config.widget ?? {}, theme: x.config.theme ?? {} };
+    return { clientName: x.name, assistantName: x.config.assistantName, welcomeMessage: x.config.welcomeMessage, widget: x.config.widget ?? {}, theme: x.config.theme ?? {} };
   });
   app.post('/chat', async (req) => {
     const b = chatSchema.parse(req.body);
