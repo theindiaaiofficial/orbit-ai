@@ -26,6 +26,17 @@ describe('chat widget lifetime and sharing contract', () => {
     expect(widget).toContain('Mark response not helpful');
     expect(widget).not.toContain('apiKey,tenant');
   });
+  it('provides send and clear-chat controls without changing the existing send path', () => {
+    expect(widget).toContain('class="tai-chat"');
+    expect(widget).toContain('aria-label="Send message"');
+    expect(widget).toContain('class="tai-clear"');
+    expect(widget).toContain('aria-label="Clear chat"');
+    expect(widget).toContain('title="Clear chat"');
+    expect(widget).toContain('clear.onclick=()=>{clearChat();input.focus();}');
+    expect(widget).toContain('localStorage.removeItem(sessionKey)');
+    expect(widget).toContain('clearInterval(expiryTimer)');
+  });
+
   it('uses the clean blue-and-white visual palette', () => {
     expect(widget).toContain("color = '#1677ff'");
     expect(widget).toContain('background:#fff;color:#172033');
