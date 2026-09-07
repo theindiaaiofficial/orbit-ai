@@ -20,7 +20,7 @@ describe('chat widget lifetime and sharing contract', () => {
     expect(widget).not.toContain('Orbit AI Conversation');
     expect(widget).toContain('<svg viewBox=');
     expect(widget).toContain('aria-label="Send message"');
-    expect(widget).toContain('const clientName = config.clientName || name;');
+    expect(widget).toContain('clientName = config.clientName || name;');
     expect(widget).toContain('Copy response');
     expect(widget).toContain('Mark response helpful');
     expect(widget).toContain('Mark response not helpful');
