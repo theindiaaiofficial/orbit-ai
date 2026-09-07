@@ -58,6 +58,10 @@ describe('persistence configuration and tenant boundaries', () => {
     expect(
       await repo.conversationForClient('22222222-2222-4222-8222-222222222222', cid),
     ).toBeUndefined();
+
+    await repo.close();
+    repos.splice(repos.indexOf(repo), 1);
+
     await fs.rm(dir, { recursive: true, force: true });
   });
 });

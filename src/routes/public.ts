@@ -22,12 +22,10 @@ export async function publicRoutes(app: FastifyInstance, c: Context) {
   });
   app.post('/chat', async (req) => {
     const b = chatSchema.parse(req.body);
-    return c.chat.chat((req as TenantRequest).tenantId, b.message, b.sessionId);
+    return c.chat.chat((req as TenantRequest).tenantId, b.message, b.sessionId, b.conversationContext);
   });
   app.post('/chat/stream', async (req, reply) => {
     const b = chatSchema.parse(req.body);
-    // Hijacking bypasses Fastify's normal response hooks, so preserve the
-    // already-authorized exact origin for browser-readable tenant streaming.
     const origin = req.headers.origin;
     if (typeof origin === 'string') {
       reply.raw.setHeader('access-control-allow-origin', origin);
@@ -40,9 +38,15 @@ export async function publicRoutes(app: FastifyInstance, c: Context) {
     reply.raw.setHeader('connection', 'keep-alive');
     reply.raw.flushHeaders?.();
     try {
-      const result = await c.chat.stream((req as TenantRequest).tenantId, b.message, b.sessionId, (token) => {
-        reply.raw.write(`event: token\ndata: ${JSON.stringify({ token })}\n\n`);
-      });
+      const result = await c.chat.stream(
+        (req as TenantRequest).tenantId,
+        b.message,
+        b.sessionId,
+        b.conversationContext ?? [],
+        (token) => {
+          reply.raw.write(`event: token\ndata: ${JSON.stringify({ token })}\n\n`);
+        }
+      );
       reply.raw.write(`event: done\ndata: ${JSON.stringify(result)}\n\n`);
     } catch {
       reply.raw.write(`event: error\ndata: ${JSON.stringify({ message: 'Unable to complete the response' })}\n\n`);
