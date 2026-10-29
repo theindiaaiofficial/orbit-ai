@@ -134,10 +134,16 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
       .get(clientId, sessionId) as { id: string } | undefined;
     if (found) return found.id;
     const id = crypto.randomUUID();
-    this.db
-      .prepare('INSERT INTO conversations VALUES(?,?,?,?)')
-      .run(id, clientId, sessionId, now());
-    return id;
+    try {
+      this.db.prepare('INSERT INTO conversations VALUES(?,?,?,?)').run(id, clientId, sessionId, now());
+      return id;
+    } catch (error) {
+      // A second process can create the same client/session after our SELECT.
+      const raced = this.db.prepare('SELECT id FROM conversations WHERE client_id=? AND session_id=?')
+        .get(clientId, sessionId) as { id: string } | undefined;
+      if (raced) return raced.id;
+      throw error;
+    }
   }
   async addMessage(cid: string, role: 'user' | 'assistant', content: string) {
     this.db
@@ -146,7 +152,7 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
   }
   async messages(cid: string) {
     return this.db
-      .prepare('SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at')
+      .prepare('SELECT role,content FROM messages WHERE conversation_id=? ORDER BY created_at, rowid')
       .all(cid) as ChatMessage[];
   }
   async saveLead(clientId: string, cid: string | undefined, data: Record<string, string>) {
@@ -280,20 +286,32 @@ CREATE TABLE IF NOT EXISTS lead_workflow(lead_id TEXT PRIMARY KEY,status TEXT NO
     id: string,
     data: { status?: string; assignee?: string | null; notes?: string },
   ) {
-    const lead = this.db
-      .prepare('SELECT id FROM leads WHERE id=? AND client_id=?')
-      .get(id, clientId);
-    if (!lead) return false;
-    if (data.status)
-      this.db
-        .prepare('UPDATE leads SET status=? WHERE id=? AND client_id=?')
-        .run(data.status, id, clientId);
-    this.db
-      .prepare(
-        `INSERT INTO lead_workflow(lead_id,status,assignee,notes,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(lead_id) DO UPDATE SET status=excluded.status,assignee=excluded.assignee,notes=excluded.notes,updated_at=excluded.updated_at`,
-      )
-      .run(id, data.status ?? 'new', data.assignee ?? null, data.notes ?? '', now());
-    return true;
+    const existing = this.db.prepare(`
+      SELECT l.id, l.status AS lead_status, w.status AS workflow_status, w.assignee, w.notes
+      FROM leads l LEFT JOIN lead_workflow w ON w.lead_id = l.id
+      WHERE l.id = ? AND l.client_id = ?
+    `).get(id, clientId) as {
+      id: string; lead_status: string; workflow_status: string | null; assignee: string | null; notes: string | null;
+    } | undefined;
+    if (!existing) return false;
+    const nextStatus = data.status ?? existing.workflow_status ?? existing.lead_status ?? 'new';
+    const nextAssignee = data.assignee === undefined ? existing.assignee : data.assignee;
+    const nextNotes = data.notes === undefined ? (existing.notes ?? '') : data.notes;
+    this.db.exec('BEGIN');
+    try {
+      if (data.status !== undefined) {
+        this.db.prepare('UPDATE leads SET status = ? WHERE id = ? AND client_id = ?').run(data.status, id, clientId);
+      }
+      this.db.prepare(`
+        INSERT INTO lead_workflow(lead_id,status,assignee,notes,updated_at) VALUES(?,?,?,?,?)
+        ON CONFLICT(lead_id) DO UPDATE SET status=excluded.status,assignee=excluded.assignee,notes=excluded.notes,updated_at=excluded.updated_at
+      `).run(id, nextStatus, nextAssignee, nextNotes, now());
+      this.db.exec('COMMIT');
+      return true;
+    } catch (error) {
+      this.db.exec('ROLLBACK');
+      throw error;
+    }
   }
   async setSetting(key: string, value: unknown) {
     this.db
