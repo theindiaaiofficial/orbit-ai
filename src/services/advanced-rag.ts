@@ -122,11 +122,13 @@ function expandedQuery(query: string, chunks: RetrievedChunk[]) {
 }
 
 function deduplicate(chunks: RetrievedChunk[]) {
-  const text = new Set<string>();
+  // Identical wording in different documents carries different provenance.
+  // Deduplicate only when both normalized content and source are the same.
+  const seen = new Set<string>();
   return chunks.filter((chunk) => {
-    const key = comparable(chunk.text);
-    if (!key || text.has(key)) return false;
-    text.add(key);
+    const key = `${chunk.source.toLowerCase()}\0${comparable(chunk.text)}`;
+    if (!comparable(chunk.text) || seen.has(key)) return false;
+    seen.add(key);
     return true;
   });
 }
@@ -136,7 +138,7 @@ function selectContext(chunks: RetrievedChunk[]) {
   let used = 0;
   for (const chunk of deduplicate(chunks)) {
     const labelLength = `[Source ${selected.length + 1}: ${chunk.source} | chunk ${chunk.id}]\n`.length;
-    if (used + labelLength + chunk.text.length > CONTEXT_CHARS) break;
+    if (used + labelLength + chunk.text.length > CONTEXT_CHARS) continue;
     selected.push(chunk);
     used += labelLength + chunk.text.length + 2;
   }
