@@ -42,7 +42,9 @@ export async function buildApp(env: Env) {
     bodyLimit: 1024 * 1024,
     requestTimeout: 30000,
   });
-  const supabaseKey = env.SUPABASE_SERVICE_ROLE_KEY ?? env.SUPABASE_ANON_KEY;
+  // Server-side adapters perform cross-table tenant-scoped operations under RLS;
+  // they must use the service role unless a tenant-JWT adapter is implemented.
+  const supabaseKey = env.SUPABASE_SERVICE_ROLE_KEY;
   const repo =
     env.DATABASE_PROVIDER === 'supabase'
       ? new SupabaseRepository(env.SUPABASE_URL!, supabaseKey)
@@ -54,13 +56,13 @@ export async function buildApp(env: Env) {
       : new LocalStorage(path.join(env.DATA_DIR, 'objects'));
   const embedding =
     env.EMBEDDING_PROVIDER === 'openai'
-      ? new OpenAIEmbedding(env.OPENAI_BASE_URL, env.OPENAI_API_KEY, env.OPENAI_EMBEDDING_MODEL)
-      : new LocalEmbedding();
+      ? new OpenAIEmbedding(env.OPENAI_BASE_URL, env.OPENAI_API_KEY, env.OPENAI_EMBEDDING_MODEL, env.SUPABASE_VECTOR_DIMENSIONS, env.llm.timeoutMs)
+      : new LocalEmbedding(env.SUPABASE_VECTOR_DIMENSIONS);
   const vector =
     env.VECTOR_PROVIDER === 'qdrant'
       ? new QdrantVector(env.QDRANT_URL, env.QDRANT_API_KEY)
       : env.VECTOR_PROVIDER === 'supabase'
-        ? new SupabaseVector(env.SUPABASE_URL!, supabaseKey)
+        ? new SupabaseVector(env.SUPABASE_URL!, supabaseKey, env.SUPABASE_VECTOR_DIMENSIONS)
         : new LocalVector(path.join(env.DATA_DIR, 'vectors.json'));
   const llm = createLlmProvider(env.llm);
   const notification =
@@ -156,7 +158,7 @@ export async function buildApp(env: Env) {
       return reply
         .code(409)
         .send({ error: { code: 'CONFLICT', message: 'Resource already exists' } });
-    app.log.error({ err: e }, 'request failed');
+    app.log.error({ requestId: _req.id, errorName: e instanceof Error ? e.name : 'UnknownError' }, 'request failed');
     return reply
       .code(500)
       .send({ error: { code: 'INTERNAL_ERROR', message: 'An internal error occurred' } });
