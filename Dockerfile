@@ -1,4 +1,5 @@
-FROM node:24-bookworm-slim AS build
+ARG NODE_VERSION=24
+FROM node:${NODE_VERSION}-bookworm-slim AS build
 WORKDIR /app
 COPY package*.json ./
 RUN npm ci
@@ -10,7 +11,7 @@ COPY dashboard ./dashboard
 COPY public ./public
 RUN npm run build
 
-FROM node:24-bookworm-slim
+FROM node:${NODE_VERSION}-bookworm-slim
 ENV NODE_ENV=production
 WORKDIR /app
 COPY package*.json ./
