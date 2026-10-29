@@ -45,11 +45,14 @@ export class ClientService {
     return this.credentials(apiKey);
   }
   async remove(id: string) {
-    const ok = await this.repo.deleteClient(id);
-    if (ok) {
-      await this.storage.removeTenant(id);
-      await this.vectors.deleteTenant(id);
-    }
-    return ok;
+    const existing = await this.repo.getClient(id);
+    if (!existing) return false;
+    // Keep relational ownership until provider cleanup succeeds. This makes a
+    // failed cleanup visible/retryable instead of orphaning data behind a
+    // deleted client record. Cross-provider atomicity still requires a durable
+    // cleanup queue for deployments needing guaranteed retries.
+    await this.storage.removeTenant(id);
+    await this.vectors.deleteTenant(id);
+    return this.repo.deleteClient(id);
   }
 }
