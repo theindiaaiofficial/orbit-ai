@@ -22,6 +22,15 @@ const schema = z.object({
   SMTP_PASS: z.string().optional(),
   SMTP_FROM: z.string().optional(),
   CORS_ORIGINS: z.string().default(''),
+  ALLOWED_ORIGINS: z.string().optional(),
+  SUPABASE_VECTOR_DIMENSIONS: z.coerce.number().int().min(8).max(8192).default(128),
+  NODE_VERSION: z.string().optional(),
+  TTS_API_KEY: z.string().optional(),
+  ORBIT_RAG_DIAGNOSTICS: z.enum(['0', '1']).default('0'),
+  ORBIT_TEMP_DEBUG_CLIENT_ID: z.string().optional(),
+  ORBIT_TEMP_DEBUG_GOUSTO: z.string().optional(),
+  ORBIT_TEMP_DEBUG_LLM_INPUT: z.string().optional(),
+  ORBIT_TEMP_DEBUG_PUREGYM: z.string().optional(),
   DATABASE_PROVIDER: z.enum(['sqlite', 'supabase']).default('sqlite'),
   REPOSITORY_PROVIDER: z.enum(['sqlite', 'supabase']).optional(),
   STORAGE_PROVIDER: z.enum(['local', 'supabase']).default('local'),
@@ -46,6 +55,7 @@ export function loadEnv(input: NodeJS.ProcessEnv = process.env): Env {
     ...input,
     OPENAI_API_KEY: input.OPENAI_API_KEY || input.EMBEDDING_API_KEY,
     OPENAI_EMBEDDING_MODEL: input.OPENAI_EMBEDDING_MODEL || input.EMBEDDING_MODEL,
+    CORS_ORIGINS: input.CORS_ORIGINS || input.ALLOWED_ORIGINS || '',
   };
   const e = schema.parse(compatibleInput);
   const databaseProvider = e.REPOSITORY_PROVIDER ?? e.DATABASE_PROVIDER;
@@ -58,18 +68,13 @@ export function loadEnv(input: NodeJS.ProcessEnv = process.env): Env {
     throw new Error(
       'ADMIN_API_KEY must be explicitly configured with at least 24 characters in production',
     );
-  if (
-    databaseProvider === 'supabase' &&
-    (!e.SUPABASE_URL || !(e.SUPABASE_SERVICE_ROLE_KEY || e.SUPABASE_ANON_KEY))
-  )
-    throw new Error('SUPABASE_URL and a Supabase key are required when DATABASE_PROVIDER=supabase');
-  if (
-    (e.STORAGE_PROVIDER === 'supabase' ||
-      e.VECTOR_PROVIDER === 'supabase' ||
-      e.NOTIFICATION_PROVIDER === 'supabase') &&
-    (!e.SUPABASE_URL || !(e.SUPABASE_SERVICE_ROLE_KEY || e.SUPABASE_ANON_KEY))
-  )
-    throw new Error('SUPABASE_URL and a Supabase key are required for Supabase providers');
+  const usesSupabase = databaseProvider === 'supabase' || e.STORAGE_PROVIDER === 'supabase' || e.VECTOR_PROVIDER === 'supabase' || e.NOTIFICATION_PROVIDER === 'supabase';
+  if (usesSupabase && (!e.SUPABASE_URL || !e.SUPABASE_SERVICE_ROLE_KEY)) {
+    throw new Error('SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for server-side Supabase providers; an anon key is not a service-role substitute');
+  }
+  if (e.VECTOR_PROVIDER === 'supabase' && e.SUPABASE_VECTOR_DIMENSIONS !== 128) {
+    throw new Error('The current Supabase migration declares vector(128); SUPABASE_VECTOR_DIMENSIONS must remain 128 until a matching schema migration and full re-embedding are applied');
+  }
   return {
     ...e,
     DATABASE_PROVIDER: databaseProvider,
