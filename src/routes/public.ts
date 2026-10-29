@@ -45,8 +45,7 @@ export async function publicRoutes(app: FastifyInstance, c: Context) {
       });
       reply.raw.write(`event: done\ndata: ${JSON.stringify(result)}\n\n`);
     } catch (error) {
-      const detail = error instanceof Error ? { name: error.name, message: error.message, stack: error.stack } : { name: typeof error, message: String(error), stack: undefined };
-      app.log.error({ route: 'POST /chat/stream', requestId: req.id, question: b.message.slice(0, 500), error: detail }, 'stream request failed after route dispatch');
+      app.log.error({ route: 'POST /chat/stream', requestId: req.id, errorName: error instanceof Error ? error.name : 'UnknownError' }, 'stream request failed after route dispatch');
       reply.raw.write(`event: error\ndata: ${JSON.stringify({ message: 'Unable to complete the response' })}\n\n`);
     } finally { reply.raw.end(); }
   });
