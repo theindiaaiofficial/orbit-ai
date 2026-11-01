@@ -154,22 +154,60 @@ export class ChatService {
     };
   }
 
-  private async answerWithGrounding(prepared: Prepared, question: string, prompt = prepared.client.prompt) {
-    const rawFirst = await this.llm.answer(this.input(prepared, question, prompt));
-    const first = cleanAnswerScaffolding(typeof rawFirst === 'string' ? rawFirst.trim() : '');
-    if (!first) return prepared.client.config.fallbackMessage;
-    // General conversation and explicit recaps do not assert tenant knowledge.
-    if (prepared.general || prepared.summary) return first;
-    const firstCheck = validateGrounding(question, first, prepared.found);
-    trace(prepared.requestId, 'GROUNDING_FIRST', { validation: firstCheck, evidenceCount: prepared.found.length, answerChars: first.length });
-    if (firstCheck.ok) return first;
-
-    const rawCorrected = await this.llm.answer(this.input(prepared, question, `${prompt}\n${groundingCorrection(firstCheck.reasons)}`));
-    const corrected = cleanAnswerScaffolding(typeof rawCorrected === 'string' ? rawCorrected.trim() : '');
-    if (!corrected) return prepared.client.config.fallbackMessage;
-    const correctedCheck = validateGrounding(question, corrected, prepared.found);
-    trace(prepared.requestId, 'GROUNDING_CORRECTION', { reasonsCount: firstCheck.reasons.length, validation: correctedCheck, final: correctedCheck.ok ? 'corrected-answer' : 'fallback', answerChars: corrected.length });
-    return correctedCheck.ok ? corrected : prepared.client.config.fallbackMessage;
+  private async answerWithGrounding(
+    prepared: Prepared,
+    question: string,
+    prompt = prepared.client.prompt,
+    initialAnswer?: string,
+  ) {
+    const first = cleanAnswerScaffolding(
+      initialAnswer ??
+        await this.llm.answer(
+          this.input(prepared, question, prompt),
+        ),
+    );
+  
+    const firstCheck = validateGrounding(
+      question,
+      first,
+      prepared.found,
+    );
+  
+    trace('grounding.check', {
+      question,
+      ok: firstCheck.ok,
+      reasons: firstCheck.reasons,
+    });
+  
+    if (firstCheck.ok) {
+      return first;
+    }
+  
+    const corrected = cleanAnswerScaffolding(
+      await this.llm.answer(
+        this.input(
+          prepared,
+          question,
+          `${prompt}\n${groundingCorrection(firstCheck.reasons)}`,
+        ),
+      ),
+    );
+  
+    const correctedCheck = validateGrounding(
+      question,
+      corrected,
+      prepared.found,
+    );
+  
+    trace('grounding.corrected', {
+      question,
+      ok: correctedCheck.ok,
+      reasons: correctedCheck.reasons,
+    });
+  
+    return correctedCheck.ok
+      ? corrected
+      : prepared.client.config.fallbackMessage;
   }
 
   async preview(clientId: string, message: string, prompt: string) {
@@ -283,22 +321,26 @@ export class ChatService {
       return this.finalize(prepared, fallback);
     }
 
-    // Buffer upstream tokens until grounding validation completes. This is safe
-    // but intentionally not progressive streaming; delivery is a validated burst.
     let streamed = '';
-    await this.llm.streamAnswer(this.input(prepared, message), (token) => { streamed += token; });
-    let answer = cleanAnswerScaffolding(streamed).trim();
-    if (!answer) answer = prepared.client.config.fallbackMessage;
-    const check = validateGrounding(message, answer, prepared.found);
-    trace(prepared.requestId, 'GROUNDING_FIRST', { validation: check, evidenceCount: prepared.found.length, mode: 'stream-buffered', answerChars: answer.length });
-    if (!check.ok) {
-      const rawCorrected = await this.llm.answer(this.input(prepared, message, `${prepared.client.prompt}\n${groundingCorrection(check.reasons)}`));
-      const corrected = cleanAnswerScaffolding(typeof rawCorrected === 'string' ? rawCorrected.trim() : '');
-      const correctedCheck = corrected ? validateGrounding(message, corrected, prepared.found) : { ok: false, reasons: ['empty answer'] };
-      answer = correctedCheck.ok ? corrected : prepared.client.config.fallbackMessage;
-      trace(prepared.requestId, 'GROUNDING_CORRECTION', { reasonsCount: check.reasons.length, validation: correctedCheck, final: correctedCheck.ok ? 'corrected-answer' : 'fallback', mode: 'stream-buffered' });
+    
+    await this.llm.streamAnswer(
+      this.input(prepared, message),
+      (token) => {
+        streamed += token;
+      },
+    );
+    
+    const answer = await this.answerWithGrounding(
+      prepared,
+      message,
+      prepared.client.prompt,
+      streamed,
+    );
+    
+    for (const token of answerTokens(answer)) {
+      onToken(token);
     }
-    for (const token of answerTokens(answer)) onToken(token);
+    
     return this.finalize(prepared, answer);
   }
 }
