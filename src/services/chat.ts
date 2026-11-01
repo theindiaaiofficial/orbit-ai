@@ -173,7 +173,7 @@ export class ChatService {
       prepared.found,
     );
   
-    trace('grounding.check', {
+    trace(prepared.requestId, 'grounding.check', {
       question,
       ok: firstCheck.ok,
       reasons: firstCheck.reasons,
@@ -199,7 +199,7 @@ export class ChatService {
       prepared.found,
     );
   
-    trace('grounding.corrected', {
+    trace(prepared.requestId, 'grounding.corrected', {
       question,
       ok: correctedCheck.ok,
       reasons: correctedCheck.reasons,
