@@ -83,7 +83,9 @@ export function evaluateEvidence(query: string, chunks: RetrievedChunk[]): Evide
     : coverage >= 0.2 && chunks.length
       ? 'PARTIALLY_SUPPORTED'
       : coverage > 0 && chunks.length ? 'UNCERTAIN' : 'NOT_SUPPORTED';
-  return { status, coverage, count: chunks.length, sources: new Set(chunks.map((chunk) => chunk.source)).size, sufficient: status === 'SUPPORTED' || status === 'PARTIALLY_SUPPORTED' };
+  return { status, coverage, count: chunks.length, sources: new Set(chunks.map((chunk) => chunk.source)).size, sufficient:
+  status === 'SUPPORTED' ||
+  status === 'PARTIALLY_SUPPORTED',
 }
 
 function profile(chunks: RetrievedChunk[]) {
