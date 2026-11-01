@@ -162,7 +162,6 @@ export function validateGrounding(
     reasons,
   };
 }
-
 export function groundingCorrection(reasons: string[]) {
   return `Grounding check failed (${reasons.join('; ')}). Re-read TENANT KNOWLEDGE as authoritative. Correct or remove every unsupported claim, number, price, availability statement, guarantee, or policy. If the requested fact is absent or marked UNKNOWN, say it is not available in the current tenant knowledge. Return only the corrected customer-facing answer.`;
 }

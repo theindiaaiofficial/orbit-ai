@@ -305,11 +305,7 @@ export async function adminRoutes(app: FastifyInstance, c: Context) {
   app.get('/clients/:id/leads.csv', async (req, reply) => {
     const { id } = idParams.parse(req.params),
       rows = (await c.repo.listLeads(id)) as LeadRow[],
-      esc = (v: unknown) => {
-        const raw = String(v ?? '');
-        const safe = /^[\t\r ]*[=+\-@]/.test(raw) ? `'${raw}` : raw;
-        return `"${safe.replaceAll('"', '""')}"`;
-      };
+      esc = (v: unknown) => `"${String(v ?? '').replaceAll('"', '""')}"`;
     const columns = [
       'id',
       'name',

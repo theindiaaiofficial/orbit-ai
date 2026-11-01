@@ -80,7 +80,7 @@ export class SupabaseRepository implements Repository {
     return (await this.getClient(v.id))!;
   }
   async listClients() {
-    const { data, error } = await this.db.from('clients').select('*').order('created_at', { ascending: true }).order('id', { ascending: true });
+    const { data, error } = await this.db.from('clients').select('*').order('created_at');
     if (error) this.fail(error);
     return (data ?? []).map((x: any) => this.map(x));
   }
@@ -161,18 +161,12 @@ export class SupabaseRepository implements Repository {
     if (found) return String(found.id);
     const id = crypto.randomUUID();
     const { error } = await this.db.from('conversations').insert({
-      id, client_id: clientId, session_id: sessionId, created_at: new Date().toISOString(),
+      id,
+      client_id: clientId,
+      session_id: sessionId,
+      created_at: new Date().toISOString(),
     });
-    if (error) {
-      // Parallel first messages may race on UNIQUE(client_id, session_id).
-      if ((error as { code?: string }).code === '23505') {
-        const { data: raced, error: re } = await this.db.from('conversations').select('id')
-          .eq('client_id', clientId).eq('session_id', sessionId).maybeSingle();
-        if (re) this.fail(re);
-        if (raced) return String(raced.id);
-      }
-      this.fail(error);
-    }
+    if (error) this.fail(error);
     return id;
   }
   async addMessage(conversationId: string, role: 'user' | 'assistant', content: string) {
@@ -190,7 +184,7 @@ export class SupabaseRepository implements Repository {
       .from('messages')
       .select('role,content')
       .eq('conversation_id', conversationId)
-      .order('created_at', { ascending: true }).order('id', { ascending: true });
+      .order('created_at');
     if (error) this.fail(error);
     return (data ?? []) as ChatMessage[];
   }
@@ -422,22 +416,29 @@ export class SupabaseRepository implements Repository {
     id: string,
     data: { status?: string; assignee?: string | null; notes?: string },
   ) {
-    const { data: lead, error: le } = await this.db.from('leads')
-      .select('id,status,lead_workflow(status,assignee,notes)')
-      .eq('id', id).eq('client_id', clientId).maybeSingle();
+    const { data: lead, error: le } = await this.db
+      .from('leads')
+      .select('id')
+      .eq('id', id)
+      .eq('client_id', clientId)
+      .maybeSingle();
     if (le) this.fail(le);
     if (!lead) return false;
-    const joined = Array.isArray((lead as any).lead_workflow) ? (lead as any).lead_workflow[0] : (lead as any).lead_workflow;
-    const status = data.status ?? joined?.status ?? (lead as any).status ?? 'new';
-    const assignee = data.assignee === undefined ? (joined?.assignee ?? null) : data.assignee;
-    const notes = data.notes === undefined ? (joined?.notes ?? '') : data.notes;
-    if (data.status !== undefined) {
-      const { error } = await this.db.from('leads').update({ status: data.status }).eq('id', id).eq('client_id', clientId);
+    if (data.status) {
+      const { error } = await this.db
+        .from('leads')
+        .update({ status: data.status })
+        .eq('id', id)
+        .eq('client_id', clientId);
       if (error) this.fail(error);
     }
     const { error } = await this.db.from('lead_workflow').upsert({
-      lead_id: id, status, assignee, notes, updated_at: new Date().toISOString(),
-    }, { onConflict: 'lead_id' });
+      lead_id: id,
+      status: data.status ?? 'new',
+      assignee: data.assignee ?? null,
+      notes: data.notes ?? '',
+      updated_at: new Date().toISOString(),
+    });
     if (error) this.fail(error);
     return true;
   }

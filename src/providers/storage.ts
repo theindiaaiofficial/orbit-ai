@@ -86,17 +86,11 @@ export class SupabaseStorage implements ObjectStorage {
   }
   async list(id: string) {
     const prefix = safeSegment(id);
-    const names: string[] = [];
-    const pageSize = 1000;
-    for (let offset = 0; offset < 100000; offset += pageSize) {
-      const { data, error } = await this.client.storage.from(this.bucket)
-        .list(prefix, { limit: pageSize, offset, sortBy: { column: 'name', order: 'asc' } });
-      if (error) throw new Error(`Supabase Storage list failed: ${error.message}`);
-      const page = (data ?? []).map((x: any) => String(x.name)).filter(Boolean);
-      names.push(...page);
-      if (page.length < pageSize) return names;
-    }
-    throw new Error('Supabase Storage listing reached the 100000-object safety limit; refusing to claim a complete listing');
+    const { data, error } = await this.client.storage
+      .from(this.bucket)
+      .list(prefix, { limit: 1000 });
+    if (error) throw new Error(`Supabase Storage list failed: ${error.message}`);
+    return (data ?? []).map((x: any) => String(x.name)).filter(Boolean);
   }
   async read(id: string, name: string) {
     const { data, error } = await this.client.storage
@@ -112,9 +106,10 @@ export class SupabaseStorage implements ObjectStorage {
   }
   async removeTenant(id: string) {
     const files = await this.list(id);
-    for (let i = 0; i < files.length; i += 100) {
-      const { error } = await this.client.storage.from(this.bucket)
-        .remove(files.slice(i, i + 100).map((x) => this.object(id, x)));
+    if (files.length) {
+      const { error } = await this.client.storage
+        .from(this.bucket)
+        .remove(files.map((x) => this.object(id, x)));
       if (error) throw new Error(`Supabase Storage tenant delete failed: ${error.message}`);
     }
   }

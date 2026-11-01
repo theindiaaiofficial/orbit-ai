@@ -83,7 +83,7 @@ export function evaluateEvidence(query: string, chunks: RetrievedChunk[]): Evide
     : coverage >= 0.2 && chunks.length
       ? 'PARTIALLY_SUPPORTED'
       : coverage > 0 && chunks.length ? 'UNCERTAIN' : 'NOT_SUPPORTED';
-  return { status, coverage, count: chunks.length, sources: new Set(chunks.map((chunk) => chunk.source)).size, sufficient:
+  return {status, coverage, count: chunks.length, sources: new Set(chunks.map((chunk) => chunk.source)).size, sufficient:
   status === 'SUPPORTED' ||
   status === 'PARTIALLY_SUPPORTED',
   };
@@ -125,13 +125,11 @@ function expandedQuery(query: string, chunks: RetrievedChunk[]) {
 }
 
 function deduplicate(chunks: RetrievedChunk[]) {
-  // Identical wording in different documents carries different provenance.
-  // Deduplicate only when both normalized content and source are the same.
-  const seen = new Set<string>();
+  const text = new Set<string>();
   return chunks.filter((chunk) => {
-    const key = `${chunk.source.toLowerCase()}\0${comparable(chunk.text)}`;
-    if (!comparable(chunk.text) || seen.has(key)) return false;
-    seen.add(key);
+    const key = comparable(chunk.text);
+    if (!key || text.has(key)) return false;
+    text.add(key);
     return true;
   });
 }
@@ -141,7 +139,7 @@ function selectContext(chunks: RetrievedChunk[]) {
   let used = 0;
   for (const chunk of deduplicate(chunks)) {
     const labelLength = `[Source ${selected.length + 1}: ${chunk.source} | chunk ${chunk.id}]\n`.length;
-    if (used + labelLength + chunk.text.length > CONTEXT_CHARS) continue;
+    if (used + labelLength + chunk.text.length > CONTEXT_CHARS) break;
     selected.push(chunk);
     used += labelLength + chunk.text.length + 2;
   }
