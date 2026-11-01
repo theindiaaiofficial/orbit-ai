@@ -32,3 +32,87 @@ describe('bounded grounding validation', () => {
     expect(validateGrounding('What is Gousto’s delivery fee?', 'The delivery fee is $3.99.', chunk('Delivery is publicly listed as £3.99.')).ok).toBe(false);
   });
 });
+
+it('does not reject a correct answer because of unrelated negative evidence', () => {
+  expect(
+    validateGrounding(
+      'How many people can a recipe box serve?',
+      'A recipe box can serve 1 to 5 people.',
+      [
+        chunk(
+          'Recipe boxes can serve 1 to 5 people. Emergency delivery is not available.',
+        ),
+      ],
+    ).ok,
+  ).toBe(true);
+});
+
+it('rejects an actually contradictory answer', () => {
+  expect(
+    validateGrounding(
+      'Is emergency delivery available?',
+      'Emergency delivery is available.',
+      [
+        chunk(
+          'Emergency delivery is not available.',
+        ),
+      ],
+    ).ok,
+  ).toBe(false);
+});
+
+it('rejects unsupported non-numeric factual claims when evidence is UNKNOWN', () => {
+  expect(
+    validateGrounding(
+      'Does the service provide emergency delivery?',
+      'Yes, emergency delivery is provided.',
+      [
+        chunk(
+          'Does the service provide emergency delivery? A: UNKNOWN.',
+        ),
+      ],
+    ).ok,
+  ).toBe(false);
+});
+
+it('rejects an answer that turns qualified evidence into an absolute claim', () => {
+  expect(
+    validateGrounding(
+      'How many people can the box serve?',
+      'Every box serves exactly 5 people.',
+      [
+        chunk(
+          'Boxes can serve most customers with 1 to 5 people depending on the box.',
+        ),
+      ],
+    ).ok,
+  ).toBe(false);
+});
+
+it('accepts a supported answer despite unrelated UNKNOWN evidence', () => {
+  expect(
+    validateGrounding(
+      'How many people can a recipe box serve?',
+      'A recipe box can serve 1 to 5 people.',
+      [
+        chunk(
+          'Recipe boxes can serve 1 to 5 people. Does the service offer emergency delivery? UNKNOWN.',
+        ),
+      ],
+    ).ok,
+  ).toBe(true);
+});
+
+it('rejects a wrong currency', () => {
+  expect(
+    validateGrounding(
+      'How much does it cost?',
+      'It costs $20.',
+      [
+        chunk(
+          'The price is £20.',
+        ),
+      ],
+    ).ok,
+  ).toBe(false);
+});
