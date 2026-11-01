@@ -1,118 +1,156 @@
+
 import { describe, expect, it } from 'vitest';
 import { validateGrounding } from '../src/services/grounding.js';
-const chunk = (text: string) => [{ id: '1', text, source: 'tenant.md', score: 0.9 }];
+
+const chunk = (text: string) => [
+  { id: '1', text, source: 'tenant.md', score: 0.9 },
+];
+
 describe('bounded grounding validation', () => {
   it('accepts an evidence-supported qualified price', () => {
-    expect(validateGrounding('What is the price?', 'It starts at £17.99 per month, plus a joining fee.', chunk('Pricing: from £17.99 per month plus joining fee; prices vary by gym.')).ok).toBe(true);
+    expect(
+      validateGrounding(
+        'What is the price?',
+        'It starts at £17.99 per month, plus a joining fee.',
+        chunk('Pricing: from £17.99 per month plus joining fee; prices vary by gym.'),
+      ).ok,
+    ).toBe(true);
   });
+
   it('rejects unsupported numeric claims and explicit unknown invention', () => {
-    const result = validateGrounding('How much is the day pass?', 'A day pass costs £25.', chunk('Day-pass pricing: UNKNOWN. The current price depends on the selected gym.'));
+    const result = validateGrounding(
+      'How much is the day pass?',
+      'A day pass costs £25.',
+      chunk('Day-pass pricing: UNKNOWN. The current price depends on the selected gym.'),
+    );
+
     expect(result.ok).toBe(false);
     expect(result.reasons).toContain('unsupported numeric claim');
   });
+
   it('rejects an absolute answer that drops a qualification', () => {
-    expect(validateGrounding('Are all gyms open 24/7?', 'All gyms are open 24/7.', chunk('Most gyms are open 24/7, but some have different hours.')).ok).toBe(false);
+    expect(
+      validateGrounding(
+        'Are all gyms open 24/7?',
+        'All gyms are open 24/7.',
+        chunk('Most gyms are open 24/7, but some have different hours.'),
+      ).ok,
+    ).toBe(false);
   });
 
   it('accepts practical paraphrases of explicitly supported Gousto facts', () => {
-    expect(validateGrounding('What is Gousto’s delivery fee?', 'Gousto delivery costs 3.99.', chunk('Delivery is publicly listed as £3.99.')).ok).toBe(true);
-    expect(validateGrounding('How many people can a Gousto recipe box serve?', 'A Gousto box serves one to five people.', chunk('Gousto boxes are designed for 1 to 5 people.')).ok).toBe(true);
-    expect(validateGrounding('How many recipes does Gousto offer each week?', 'You can choose from over 175 recipes each week.', chunk('Customers can choose from over 175 recipes each week.')).ok).toBe(true);
+    expect(
+      validateGrounding(
+        'What is Gousto’s delivery fee?',
+        'Gousto delivery costs 3.99.',
+        chunk('Delivery is publicly listed as £3.99.'),
+      ).ok,
+    ).toBe(true);
+
+    expect(
+      validateGrounding(
+        'How many people can a Gousto recipe box serve?',
+        'A Gousto box serves one to five people.',
+        chunk('Gousto boxes are designed for 1 to 5 people.'),
+      ).ok,
+    ).toBe(true);
+
+    expect(
+      validateGrounding(
+        'How many recipes does Gousto offer each week?',
+        'You can choose from over 175 recipes each week.',
+        chunk('Customers can choose from over 175 recipes each week.'),
+      ).ok,
+    ).toBe(true);
   });
 
   it('does not let an unrelated tenant UNKNOWN line reject supported capacity', () => {
-    expect(validateGrounding(
-      'How many people can a Gousto recipe box serve?',
-      'A Gousto recipe box can serve anywhere from 1 to 5 people.',
-      chunk('Gousto offers boxes for 1 to 5 people. Does Gousto provide emergency delivery? A: UNKNOWN.'),
-    ).ok).toBe(true);
+    expect(
+      validateGrounding(
+        'How many people can a Gousto recipe box serve?',
+        'A Gousto recipe box can serve anywhere from 1 to 5 people.',
+        chunk(
+          'Gousto offers boxes for 1 to 5 people. Does Gousto provide emergency delivery? A: UNKNOWN.',
+        ),
+      ).ok,
+    ).toBe(true);
   });
 
   it('still rejects a different currency for a supported pound amount', () => {
-    expect(validateGrounding('What is Gousto’s delivery fee?', 'The delivery fee is $3.99.', chunk('Delivery is publicly listed as £3.99.')).ok).toBe(false);
+    expect(
+      validateGrounding(
+        'What is Gousto’s delivery fee?',
+        'The delivery fee is $3.99.',
+        chunk('Delivery is publicly listed as £3.99.'),
+      ).ok,
+    ).toBe(false);
   });
-});
 
-it('does not reject a correct answer because of unrelated negative evidence', () => {
-  expect(
-    validateGrounding(
-      'How many people can a recipe box serve?',
-      'A recipe box can serve 1 to 5 people.',
-      [
+  it('does not reject a correct answer because of unrelated negative evidence', () => {
+    expect(
+      validateGrounding(
+        'How many people can a recipe box serve?',
+        'A recipe box can serve 1 to 5 people.',
         chunk(
           'Recipe boxes can serve 1 to 5 people. Emergency delivery is not available.',
         ),
-      ],
-    ).ok,
-  ).toBe(true);
-});
+      ).ok,
+    ).toBe(true);
+  });
 
-it('rejects an actually contradictory answer', () => {
-  expect(
-    validateGrounding(
-      'Is emergency delivery available?',
-      'Emergency delivery is available.',
-      [
-        chunk(
-          'Emergency delivery is not available.',
-        ),
-      ],
-    ).ok,
-  ).toBe(false);
-});
+  it('rejects an actually contradictory answer', () => {
+    expect(
+      validateGrounding(
+        'Is emergency delivery available?',
+        'Emergency delivery is available.',
+        chunk('Emergency delivery is not available.'),
+      ).ok,
+    ).toBe(false);
+  });
 
-it('rejects unsupported non-numeric factual claims when evidence is UNKNOWN', () => {
-  expect(
-    validateGrounding(
-      'Does the service provide emergency delivery?',
-      'Yes, emergency delivery is provided.',
-      [
+  it('rejects unsupported non-numeric factual claims when evidence is UNKNOWN', () => {
+    expect(
+      validateGrounding(
+        'Does the service provide emergency delivery?',
+        'Yes, emergency delivery is provided.',
         chunk(
           'Does the service provide emergency delivery? A: UNKNOWN.',
         ),
-      ],
-    ).ok,
-  ).toBe(false);
-});
+      ).ok,
+    ).toBe(false);
+  });
 
-it('rejects an answer that turns qualified evidence into an absolute claim', () => {
-  expect(
-    validateGrounding(
-      'How many people can the box serve?',
-      'Every box serves exactly 5 people.',
-      [
+  it('rejects an answer that turns qualified evidence into an absolute claim', () => {
+    expect(
+      validateGrounding(
+        'How many people can the box serve?',
+        'Every box serves exactly 5 people.',
         chunk(
           'Boxes can serve most customers with 1 to 5 people depending on the box.',
         ),
-      ],
-    ).ok,
-  ).toBe(false);
-});
+      ).ok,
+    ).toBe(false);
+  });
 
-it('accepts a supported answer despite unrelated UNKNOWN evidence', () => {
-  expect(
-    validateGrounding(
-      'How many people can a recipe box serve?',
-      'A recipe box can serve 1 to 5 people.',
-      [
+  it('accepts a supported answer despite unrelated UNKNOWN evidence', () => {
+    expect(
+      validateGrounding(
+        'How many people can a recipe box serve?',
+        'A recipe box can serve 1 to 5 people.',
         chunk(
           'Recipe boxes can serve 1 to 5 people. Does the service offer emergency delivery? UNKNOWN.',
         ),
-      ],
-    ).ok,
-  ).toBe(true);
-});
+      ).ok,
+    ).toBe(true);
+  });
 
-it('rejects a wrong currency', () => {
-  expect(
-    validateGrounding(
-      'How much does it cost?',
-      'It costs $20.',
-      [
-        chunk(
-          'The price is £20.',
-        ),
-      ],
-    ).ok,
-  ).toBe(false);
+  it('rejects a wrong currency', () => {
+    expect(
+      validateGrounding(
+        'How much does it cost?',
+        'It costs $20.',
+        chunk('The price is £20.'),
+      ).ok,
+    ).toBe(false);
+  });
 });
