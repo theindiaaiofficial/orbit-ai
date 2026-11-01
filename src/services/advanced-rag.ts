@@ -86,7 +86,8 @@ export function evaluateEvidence(query: string, chunks: RetrievedChunk[]): Evide
   return { status, coverage, count: chunks.length, sources: new Set(chunks.map((chunk) => chunk.source)).size, sufficient:
   status === 'SUPPORTED' ||
   status === 'PARTIALLY_SUPPORTED',
-}
+  };
+  }
 
 function profile(chunks: RetrievedChunk[]) {
   const frequencies = new Map<string, number>();
